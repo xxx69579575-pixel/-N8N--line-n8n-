@@ -1,0 +1,42 @@
+[2026-03-24T16:11:04.575Z] === NOTIFICATION HOOK STARTED ===
+[2026-03-24T16:11:04.578Z] Notification hook input received: {
+  "session_id": "012d0e51-fc57-46f3-ba92-02f50bf8be2b",
+  "transcript_path": "C:\\Users\\xx\\.claude\\projects\\D--n8n-CLAUDE------AI------\\012d0e51-fc57-46f3-ba92-02f50bf8be2b.jsonl",
+  "cwd": "D:\\n8n\\CLAUDE 實做\\本地AI企業問答助理",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Bash",
+  "notification_type": "permission_prompt"
+}
+[2026-03-24T16:11:04.578Z] Notification type: permission_prompt
+[2026-03-24T16:11:04.578Z] Message: Claude needs your permission to use Bash
+[2026-03-24T16:11:04.578Z] Playing notification sound: C:/Windows/Media/chimes.wav
+[2026-03-24T16:11:08.981Z] Notification sound played successfully
+[2026-03-24T16:11:08.982Z] === NOTIFICATION HOOK COMPLETED ===
+[2026-03-24T16:15:41.842Z] === NOTIFICATION HOOK STARTED ===
+[2026-03-24T16:15:41.844Z] Notification hook input received: {
+  "session_id": "012d0e51-fc57-46f3-ba92-02f50bf8be2b",
+  "transcript_path": "C:\\Users\\xx\\.claude\\projects\\D--n8n-CLAUDE------AI------\\012d0e51-fc57-46f3-ba92-02f50bf8be2b.jsonl",
+  "cwd": "D:\\n8n\\CLAUDE 實做\\本地AI企業問答助理",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Read",
+  "notification_type": "permission_prompt"
+}
+[2026-03-24T16:15:41.844Z] Notification type: permission_prompt
+[2026-03-24T16:15:41.844Z] Message: Claude needs your permission to use Read
+[2026-03-24T16:15:41.844Z] Playing notification sound: C:/Windows/Media/chimes.wav
+[2026-03-24T16:15:46.255Z] Notification sound played successfully
+[2026-03-24T16:15:46.255Z] === NOTIFICATION HOOK COMPLETED ===
+[2026-03-24T16:22:18.972Z] === NOTIFICATION HOOK STARTED ===
+[2026-03-24T16:22:18.974Z] Notification hook input received: {
+  "session_id": "012d0e51-fc57-46f3-ba92-02f50bf8be2b",
+  "transcript_path": "C:\\Users\\xx\\.claude\\projects\\D--n8n-CLAUDE------AI------\\012d0e51-fc57-46f3-ba92-02f50bf8be2b.jsonl",
+  "cwd": "D:\\n8n\\CLAUDE 實做\\本地AI企業問答助理",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to use Bash",
+  "notification_type": "permission_prompt"
+}
+[2026-03-24T16:22:18.974Z] Notification type: permission_prompt
+[2026-03-24T16:22:18.974Z] Message: Claude needs your permission to use Bash
+[2026-03-24T16:22:18.974Z] Playing notification sound: C:/Windows/Media/chimes.wav
+[2026-03-24T16:22:23.384Z] Notification sound played successfully
+[2026-03-24T16:22:23.385Z] === NOTIFICATION HOOK COMPLETED ===

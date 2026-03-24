@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(docker --version)",
+      "Bash(docker compose:*)",
+      "Bash(git --version)",
+      "Bash(ollama --version)",
+      "Bash(bash /tmp/worker--build-alias-list.sh)",
+      "Bash(bash /tmp/monitor--build-alias-list.sh)"
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+建構n8n自動存入資料庫n8n+企業問答助理-n8n+ai+向量庫
+
+1."D:\n8n\CLAUDE 實做\實際企業應用：本地AI企業問答助理：n8n + Qwen2.5 + Postgres向量資料庫整合建構企業知識庫系統\n8n自動存入資料庫"
+2."D:\n8n\CLAUDE 實做\實際企業應用：本地AI企業問答助理：n8n + Qwen2.5 + Postgres向量資料庫整合建構企業知識庫系統\企業問答助理line+n8n+向量庫"
+
+任務構件
+Ollama+Qwen2.5+嵌入模型:提供本地語言模型推理與向
+量嵌入。
+PostgreSQL+ + pgvector :
+自動儲存文本與向量資料,支援向量相似度查詢。
+n8n Al Agent :
+自動化工作流程設計,串接模型與資料庫,實現問答服務。
+
+
+實做流程
+1. 資料處理:將企業内部文件進行切片與向量化處
+理,存入pgvector 資料庫。
+2. 問答服務:使用者提出問題(line app),系統透過向量相似
+度查詢相關文本,並由Qwen2.5模型生成回答。
+
+
+環境建置
+GDPR
+PostgreSQL 安裝
+安裝 PostgreSQL 數據庫系統
+pgvector安裝
+安裝pgvector 擴展以進行向量搜索
+pgAdmin管理後台
+使用pgAdmin 管理 PostgreSQL數據庫
+http://192.168.1.107:5050/
+資料夾在"D:\n8n\CLAUDE 實做\實際企業應用：本地AI企業問答助理：n8n + Qwen2.5 + Postgres向量資料庫整合建構企業知識庫系統\docker_postgreSQL"
+
+
+
+
