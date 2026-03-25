@@ -1,0 +1,22 @@
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ai-qa-n8n
+    restart: unless-stopped
+    ports:
+      - "5681:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5681
+      - GENERIC_TIMEZONE=Asia/Taipei
+      - TZ=Asia/Taipei
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - D:/n8n/CLAUDE 實做/本地AI企業問答助理:/workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  n8n_data:
