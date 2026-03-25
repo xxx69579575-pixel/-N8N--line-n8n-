@@ -1,0 +1,359 @@
+{
+  "id": "ent-doc-ingest-v1",
+  "name": "Enterprise Doc Ingest",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Read Inbox Files",
+      "type": "n8n-nodes-base.readBinaryFiles",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "parameters": {
+        "filePath": "={{ $env.INGEST_INBOX_DIR }}/*.{docx,pdf,xlsx,xls,jpg,jpeg,png}",
+        "dataPropertyName": "data",
+        "options": {}
+      },
+      "continueOnFail": true,
+      "notes": "Reads all supported files from inbox. If no files, this node outputs nothing and the workflow stops naturally. Supported types: .docx .pdf .xlsx .xls .jpg .jpeg .png"
+    },
+    {
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Move to Processing",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [750, 300],
+      "parameters": {
+        "command": "python -c \"import shutil,os; src=r'{{ $binary.data.filePath }}'; proc=os.environ.get('INGEST_PROCESSING_DIR','D:/AI_KB/processing'); os.makedirs(proc,exist_ok=True); dst=os.path.join(proc,os.path.basename(src)); shutil.move(src,dst); print(dst)\""
+      },
+      "continueOnFail": true,
+      "notes": "Moves each file from inbox to processing directory. Outputs new file path on stdout. Uses os.environ INGEST_PROCESSING_DIR."
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Extract Text",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1000, 300],
+      "parameters": {
+        "command": "python scripts/extract_text.py \"{{ $json.stdout.trim() }}\"",
+        "cwd": "={{ $env.PROJECT_ROOT }}"
+      },
+      "continueOnFail": true,
+      "notes": "Calls extract_text.py with the processing-dir path from previous stdout. Outputs JSON: {text, metadata, ocr_used, page_count}. Supports .docx, .pdf (text+scan), .xlsx/.xls, images (OCR)."
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Parse Extract Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Check for execution error\nif ($input.item.json.exitCode !== 0) {\n  throw new Error('extract_text.py failed (exit ' + $input.item.json.exitCode + '): ' + $input.item.json.stderr);\n}\n\n// Parse JSON output from extract_text.py\nlet extractData;\ntry {\n  extractData = JSON.parse($input.item.json.stdout);\n} catch (e) {\n  throw new Error('Failed to parse extract_text.py JSON output: ' + e.message + '\\nstdout: ' + $input.item.json.stdout.slice(0, 500));\n}\n\nif (!extractData.text || extractData.text.trim().length === 0) {\n  throw new Error('Extracted text is empty for file: ' + (extractData.metadata && extractData.metadata.file_name || 'unknown'));\n}\n\n// Write text to a temp file to safely pass to chunk_text.py (avoids shell-escaping issues)\nconst os = require('os');\nconst fs = require('fs');\nconst path = require('path');\nconst tmpText = path.join(os.tmpdir(), 'n8n_text_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.txt');\nfs.writeFileSync(tmpText, extractData.text, 'utf8');\n\nreturn {\n  json: {\n    text: extractData.text,\n    metadata: extractData.metadata,\n    ocr_used: extractData.ocr_used || false,\n    page_count: extractData.page_count || 1,\n    _tmp_text: tmpText\n  }\n};"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Chunk Text",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1500, 300],
+      "parameters": {
+        "command": "python -c \"import subprocess,sys,os; txt=open(r'{{ $json._tmp_text }}',encoding='utf-8').read(); r=subprocess.run(['python','scripts/chunk_text.py','--chunk-size','800','--overlap','150','--text',txt],capture_output=True,text=True,encoding='utf-8',cwd=os.environ.get('PROJECT_ROOT','.')); sys.stdout.buffer.write(r.stdout.encode('utf-8') if r.stdout else b''); sys.exit(r.returncode)\""
+      },
+      "continueOnFail": true,
+      "notes": "Reads extracted text from temp file and calls chunk_text.py. Uses a Python wrapper to safely pass text as subprocess argument, avoiding shell escaping issues. chunk-size=800, overlap=150."
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Parse Chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1750, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "if ($input.item.json.exitCode !== 0) {\n  throw new Error('chunk_text.py failed (exit ' + $input.item.json.exitCode + '): ' + $input.item.json.stderr);\n}\n\nlet chunks;\ntry {\n  chunks = JSON.parse($input.item.json.stdout);\n} catch (e) {\n  throw new Error('Failed to parse chunk_text.py JSON output: ' + e.message);\n}\n\nif (!Array.isArray(chunks) || chunks.length === 0) {\n  throw new Error('chunk_text.py returned empty chunks array');\n}\n\n// Write chunks array to temp file for embed_chunks.py stdin\nconst os = require('os');\nconst fs = require('fs');\nconst path = require('path');\nconst tmpChunks = path.join(os.tmpdir(), 'n8n_chunks_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.json');\nfs.writeFileSync(tmpChunks, JSON.stringify(chunks), 'utf8');\n\n// Clean up text temp file\ntry { fs.unlinkSync($input.item.json._tmp_text); } catch(e) {}\n\nreturn {\n  json: {\n    text: $input.item.json.text,\n    metadata: $input.item.json.metadata,\n    ocr_used: $input.item.json.ocr_used,\n    page_count: $input.item.json.page_count,\n    chunk_count: chunks.length,\n    _tmp_chunks: tmpChunks\n  }\n};"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Embed Chunks",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2000, 300],
+      "parameters": {
+        "command": "python -c \"import subprocess,sys,os; r=subprocess.run(['python','scripts/embed_chunks.py'],stdin=open(r'{{ $json._tmp_chunks }}',encoding='utf-8'),capture_output=True,text=True,encoding='utf-8',cwd=os.environ.get('PROJECT_ROOT','.')); sys.stdout.buffer.write(r.stdout.encode('utf-8') if r.stdout else b''); sys.exit(r.returncode)\""
+      },
+      "continueOnFail": true,
+      "notes": "Calls embed_chunks.py with chunks JSON piped via stdin from temp file. embed_chunks.py reads JSON array from stdin, calls Ollama /api/embeddings for each chunk, and outputs updated array with 'embedding' fields. Uses OLLAMA_BASE_URL and OLLAMA_EMBED_MODEL env vars."
+    },
+    {
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Parse Embeddings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2250, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "if ($input.item.json.exitCode !== 0) {\n  throw new Error('embed_chunks.py failed (exit ' + $input.item.json.exitCode + '): ' + $input.item.json.stderr);\n}\n\nlet embeddedChunks;\ntry {\n  embeddedChunks = JSON.parse($input.item.json.stdout);\n} catch (e) {\n  throw new Error('Failed to parse embed_chunks.py JSON output: ' + e.message);\n}\n\nif (!Array.isArray(embeddedChunks) || embeddedChunks.length === 0) {\n  throw new Error('embed_chunks.py returned empty result');\n}\n\n// Build full payload for write_to_db.py\n// Format: {text, metadata, ocr_used, page_count, chunks: [{chunk_index, chunk_text, char_count, token_estimate, embedding}]}\nconst payload = {\n  text: $input.item.json.text,\n  metadata: $input.item.json.metadata,\n  ocr_used: $input.item.json.ocr_used || false,\n  page_count: $input.item.json.page_count || 1,\n  chunks: embeddedChunks\n};\n\n// Write full payload to temp file for write_to_db.py stdin\nconst os = require('os');\nconst fs = require('fs');\nconst path = require('path');\nconst tmpPayload = path.join(os.tmpdir(), 'n8n_payload_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.json');\nfs.writeFileSync(tmpPayload, JSON.stringify(payload), 'utf8');\n\n// Clean up chunks temp file\ntry { fs.unlinkSync($input.item.json._tmp_chunks); } catch(e) {}\n\nreturn {\n  json: {\n    metadata: $input.item.json.metadata,\n    chunk_count: embeddedChunks.length,\n    _tmp_payload: tmpPayload\n  }\n};"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Write to DB",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2500, 300],
+      "parameters": {
+        "command": "python -c \"import subprocess,sys,os; r=subprocess.run(['python','scripts/write_to_db.py'],stdin=open(r'{{ $json._tmp_payload }}',encoding='utf-8'),capture_output=True,text=True,encoding='utf-8',cwd=os.environ.get('PROJECT_ROOT','.')); sys.stdout.buffer.write(r.stdout.encode('utf-8') if r.stdout else b''); sys.exit(r.returncode)\""
+      },
+      "continueOnFail": true,
+      "notes": "Calls write_to_db.py with full payload (text+metadata+embedded chunks) piped via stdin. write_to_db.py handles deduplication internally via SHA-256 hash check. Outputs JSON status: {status: 'ok'|'skipped'|'error', ...}. PostgreSQL connection uses POSTGRES_* env vars."
+    },
+    {
+      "id": "a1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2750, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-exit-code",
+              "leftValue": "={{ $json.exitCode }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "Routes to 'Move to Processed' (true) if write_to_db.py exited with code 0 (ok or skipped). Routes to 'Move to Error' (false) on non-zero exit. Status 'skipped' (duplicate file) also goes to processed."
+    },
+    {
+      "id": "a1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Move to Processed",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [3000, 150],
+      "parameters": {
+        "command": "python -c \"import shutil,os; src=r'{{ $json.metadata.file_path }}'; proc=os.environ.get('INGEST_PROCESSED_DIR','D:/AI_KB/processed'); os.makedirs(proc,exist_ok=True); dst=os.path.join(proc,os.path.basename(src)); shutil.move(src,dst); print(dst)\""
+      },
+      "notes": "Moves successfully processed file from processing/ to processed/ directory. metadata.file_path contains the processing-dir path set by extract_text.py."
+    },
+    {
+      "id": "a1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Move to Error",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [3000, 450],
+      "parameters": {
+        "command": "python -c \"import shutil,os; src=r'{{ $json.metadata.file_path if $json.metadata else ($json.stdout or '').strip() }}'; err_dir=os.environ.get('INGEST_ERROR_DIR','D:/AI_KB/error'); os.makedirs(err_dir,exist_ok=True); dst=os.path.join(err_dir,os.path.basename(src)) if src else ''; shutil.move(src,dst) if src and os.path.exists(src) else None; print(dst or 'no-file')\""
+      },
+      "notes": "Moves failed file from processing/ to error/ directory. Handles cases where metadata may not be fully populated (early-stage failures)."
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Inbox Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Inbox Files": {
+      "main": [
+        [
+          {
+            "node": "Move to Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move to Processing": {
+      "main": [
+        [
+          {
+            "node": "Extract Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Text": {
+      "main": [
+        [
+          {
+            "node": "Parse Extract Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Extract Result": {
+      "main": [
+        [
+          {
+            "node": "Chunk Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chunk Text": {
+      "main": [
+        [
+          {
+            "node": "Parse Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Chunks": {
+      "main": [
+        [
+          {
+            "node": "Embed Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embed Chunks": {
+      "main": [
+        [
+          {
+            "node": "Parse Embeddings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Embeddings": {
+      "main": [
+        [
+          {
+            "node": "Write to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write to DB": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Success": {
+      "main": [
+        [
+          {
+            "node": "Move to Processed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Move to Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "local",
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [
+    {
+      "id": "tag-ingest",
+      "name": "document-ingest"
+    }
+  ],
+  "pinData": {},
+  "staticData": null,
+  "_comments": {
+    "environment_variables": [
+      "PROJECT_ROOT  — absolute path to this repo (e.g. D:/n8n/CLAUDE 實做/本地AI企業問答助理)",
+      "INGEST_INBOX_DIR      — e.g. D:/AI_KB/inbox",
+      "INGEST_PROCESSING_DIR — e.g. D:/AI_KB/processing",
+      "INGEST_PROCESSED_DIR  — e.g. D:/AI_KB/processed",
+      "INGEST_ERROR_DIR      — e.g. D:/AI_KB/error",
+      "POSTGRES_HOST=localhost",
+      "POSTGRES_PORT=65432",
+      "POSTGRES_DB=vectordb",
+      "POSTGRES_USER=testuser",
+      "POSTGRES_PASSWORD=testpwd",
+      "OLLAMA_BASE_URL=http://localhost:11434",
+      "OLLAMA_EMBED_MODEL=bge-m3"
+    ],
+    "import_instructions": [
+      "1. In n8n UI: Workflows → Import from File → select this JSON",
+      "2. Set environment variables in n8n Settings > Variables (or via .env / system env)",
+      "3. Ensure PROJECT_ROOT points to the repo root so scripts/ can be found",
+      "4. Activate the workflow to start polling every 1 minute",
+      "5. Drop files into INGEST_INBOX_DIR to trigger processing"
+    ],
+    "deduplication_note": "Deduplication is handled entirely inside write_to_db.py via SHA-256 hash lookup in the documents table. Duplicate files exit with code 0 and status='skipped', which routes them to processed/ (not error/).",
+    "error_handling_note": "Each Execute Command node has continueOnFail:true. The Check Success IF node routes on exitCode===0. For failures in the middle of the pipeline (Extract/Chunk/Embed), the Code nodes throw exceptions which propagate and will trigger n8n's built-in error workflow if configured in settings.errorWorkflow.",
+    "windows_path_note": "Commands use Python's subprocess module and raw string literals (r'...') for Windows path compatibility. The workflow was designed for Windows but should work on Linux/Mac with the same env var values using forward-slash paths."
+  }
+}
