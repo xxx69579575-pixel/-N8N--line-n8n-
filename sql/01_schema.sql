@@ -160,3 +160,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_sessions_line_user ON conversation_se
 
 COMMENT ON TABLE qa_logs IS '問答日誌（user_id、question、retrieved_chunk_ids、answer、confidence）';
 COMMENT ON TABLE conversation_sessions IS '對話記憶（line_user_id、turns JSONB）';
+
+-- LINE 使用者白名單
+CREATE TABLE IF NOT EXISTS allowed_users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_user_id VARCHAR(100) NOT NULL UNIQUE,
+    display_name VARCHAR(200),
+    department VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_allowed_users_line_user ON allowed_users(line_user_id);
+
+COMMENT ON TABLE allowed_users IS 'LINE 使用者白名單，僅列於此表的 line_user_id 可使用問答功能';

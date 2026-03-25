@@ -1,0 +1,431 @@
+{
+  "id": "line-qa-assistant-v1",
+  "name": "LINE QA Assistant",
+  "_comments": {
+    "description": "LINE QA Assistant — RAG workflow: LINE Webhook → signature verify → allowed_users auth → vector search → Ollama Qwen2.5 → LINE reply → session update → qa_log",
+    "required_env_vars": {
+      "PROJECT_ROOT": "Absolute path to project root, e.g. D:/n8n/CLAUDE 實做/本地AI企業問答助理",
+      "LINE_CHANNEL_ACCESS_TOKEN": "From LINE Developers Console → Messaging API → Channel access token",
+      "LINE_CHANNEL_SECRET": "From LINE Developers Console → Basic settings → Channel secret",
+      "OLLAMA_BASE_URL": "http://localhost:11434",
+      "OLLAMA_CHAT_MODEL": "qwen2.5",
+      "POSTGRES_HOST": "localhost",
+      "POSTGRES_PORT": "65432",
+      "POSTGRES_DB": "vectordb",
+      "POSTGRES_USER": "testuser",
+      "POSTGRES_PASSWORD": "testpwd"
+    },
+    "credential_setup": "Create a PostgreSQL credential in n8n named 'PostgreSQL - vectordb': host=localhost, port=65432, db=vectordb, user=testuser, password=testpwd. Update credential ID in all Postgres nodes (currently set to placeholder 'POSTGRES_CRED_ID').",
+    "webhook_url": "After import, activate workflow. Webhook URL: https://<your-n8n-domain>/webhook/line-qa — register this in LINE Developers Console as Webhook URL.",
+    "rawbody_note": "Webhook node requires 'Raw Body' option enabled so $json.rawBody contains the exact bytes LINE signed. Headers must include x-line-signature (available automatically via $json.headers in n8n v1.x).",
+    "error_handler_note": "Error Trigger fires when any node throws. It cannot send a LINE reply (replyToken unavailable in error context) but logs to processing_logs. Set this workflow as its own errorWorkflow in n8n Workflow Settings."
+  },
+  "nodes": [
+    {
+      "id": "qa-node-001",
+      "name": "LINE Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "line-qa",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "line-qa-webhook-001",
+      "notes": "Receives LINE Webhook POST. responseMode=onReceived returns HTTP 200 immediately (LINE requires 200 within 1s). rawBody=true stores raw bytes as $json.rawBody for HMAC-SHA256 signature verification. Signature is in $json.headers['x-line-signature']."
+    },
+    {
+      "id": "qa-node-002",
+      "name": "Execute: line_verify",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [500, 300],
+      "parameters": {
+        "command": "python -c \"import subprocess,sys,os,json;body=r'''{{ $json.rawBody || '' }}''';sig='{{ ($json.headers || {})['x-line-signature'] || '' }}';pd=os.environ.get('PROJECT_ROOT','.');inp=json.dumps({'body':body,'signature':sig});r=subprocess.run([sys.executable,os.path.join(pd,'scripts','line_verify.py')],input=inp.encode('utf-8'),capture_output=True,cwd=pd);sys.stdout.buffer.write(r.stdout);sys.exit(r.returncode)\"",
+        "cwd": "={{ $env.PROJECT_ROOT }}"
+      },
+      "notes": "Pipes {body, signature} JSON to line_verify.py stdin. Uses raw triple-quoted string r'''...''' so JSON double-quotes in body are safe. Output: {valid: true/false}. LINE webhook body never contains ''' so the raw triple-quote approach is safe."
+    },
+    {
+      "id": "qa-node-003",
+      "name": "Parse Verify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Check line_verify.py exit code and stdout\nif ($input.item.json.exitCode !== 0) {\n  // line_verify failed — treat as invalid, stop (LINE already got 200)\n  return null;\n}\nlet result;\ntry {\n  result = JSON.parse($input.item.json.stdout);\n} catch(e) {\n  return null;\n}\nif (!result.valid) {\n  // Invalid signature — stop workflow silently\n  return null;\n}\n// Valid signature — pass original webhook data downstream\nreturn { json: $('LINE Webhook').first().json };"
+      },
+      "notes": "Returns null (drops item) if signature is invalid or line_verify.py failed. Returning null stops the workflow naturally; n8n already replied HTTP 200 to LINE."
+    },
+    {
+      "id": "qa-node-004",
+      "name": "Parse Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const data = $input.item.json;\nconst body = data.body || {};\nconst events = body.events || [];\nif (events.length === 0) return null; // webhook verification ping\nconst event = events[0];\n// Only handle text messages\nif (event.type !== 'message' || !event.message || event.message.type !== 'text') return null;\nreturn {\n  json: {\n    lineUserId: event.source && event.source.userId || '',\n    messageText: event.message.text || '',\n    replyToken: event.replyToken || ''\n  }\n};"
+      },
+      "notes": "Extracts lineUserId, messageText, replyToken from events[0]. Returns null for non-text events or empty events array (LINE webhook verification). Only processes text message events."
+    },
+    {
+      "id": "qa-node-005",
+      "name": "Execute: vector_search",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1250, 300],
+      "parameters": {
+        "command": "python -c \"import subprocess,sys,os;q=sys.argv[1];pd=os.environ.get('PROJECT_ROOT','.');r=subprocess.run([sys.executable,os.path.join(pd,'scripts','vector_search.py'),'--question',q,'--top-k','5','--min-sim','0.7'],capture_output=True,cwd=pd);sys.stdout.buffer.write(r.stdout);sys.exit(r.returncode)\" \"{{ $json.messageText || '' }}\"",
+        "cwd": "={{ $env.PROJECT_ROOT }}"
+      },
+      "continueOnFail": true,
+      "notes": "Calls vector_search.py via subprocess list (no shell quoting issues). Question passed as sys.argv[1]. Uses OLLAMA_EMBED_MODEL for embedding, pgvector cosine search, top_k=5, min_sim=0.7. Output: JSON array of {chunk_id, chunk_text, file_name, similarity}."
+    },
+    {
+      "id": "qa-node-006",
+      "name": "Parse Chunks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1500, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "let chunks = [];\nif ($input.item.json.exitCode === 0) {\n  try { chunks = JSON.parse($input.item.json.stdout); } catch(e) { chunks = []; }\n}\nif (!Array.isArray(chunks)) chunks = [];\nconst msgData = $('Parse Message').first().json;\nreturn {\n  json: {\n    lineUserId: msgData.lineUserId,\n    messageText: msgData.messageText,\n    replyToken: msgData.replyToken,\n    chunks: chunks,\n    chunkIds: chunks.map(function(c) { return c.chunk_id; })\n  }\n};"
+      },
+      "notes": "Parses vector_search.py JSON output. Gracefully degrades to empty chunks if vector_search failed. Carries lineUserId/messageText/replyToken from Parse Message for later nodes."
+    },
+    {
+      "id": "qa-node-007",
+      "name": "Query conversation_sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1750, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE((SELECT turns FROM conversation_sessions WHERE line_user_id = $1 LIMIT 1), '[]'::jsonb) AS turns",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.lineUserId]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "PostgreSQL - vectordb"
+        }
+      },
+      "notes": "Always returns exactly 1 row using COALESCE. Returns existing turns or '[]' if no session yet. This guarantees downstream nodes always receive 1 item (empty turns array for new users)."
+    },
+    {
+      "id": "qa-node-008",
+      "name": "Query allowed_users",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2000, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS(SELECT 1 FROM allowed_users WHERE line_user_id = $1) AS authorized",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$('Parse Chunks').first().json.lineUserId]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "PostgreSQL - vectordb"
+        }
+      },
+      "notes": "Always returns exactly 1 row with {authorized: true/false}. Uses EXISTS so 0 or 1 match gives boolean result — ensures Check Auth always executes regardless of whitelist membership."
+    },
+    {
+      "id": "qa-node-009",
+      "name": "Check Auth",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2250, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const authResult = $input.item.json;\nconst msgData = $('Parse Message').first().json;\n\nif (!authResult.authorized) {\n  // User not in allowed_users — send LINE reply and stop\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.line.me/v2/bot/message/reply',\n      headers: {\n        'Authorization': 'Bearer ' + process.env.LINE_CHANNEL_ACCESS_TOKEN,\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({\n        replyToken: msgData.replyToken,\n        messages: [{ type: 'text', text: '您無使用權限' }]\n      })\n    });\n  } catch(e) {\n    // Ignore reply error — workflow stops regardless\n  }\n  return null;\n}\n\n// Authorized — combine data and write prompt_builder temp file\nconst chunksData = $('Parse Chunks').first().json;\nconst sessionData = $('Query conversation_sessions').first().json;\nconst turns = Array.isArray(sessionData.turns) ? sessionData.turns : [];\nconst history = turns.slice(-6); // last 3 rounds\n\nconst os = require('os');\nconst fs = require('fs');\nconst path = require('path');\n\nconst promptInput = {\n  question: chunksData.messageText,\n  chunks: chunksData.chunks || [],\n  history: history\n};\nconst tmpPrompt = path.join(os.tmpdir(), 'n8n_prompt_' + Date.now() + '_' + Math.random().toString(36).slice(2) + '.json');\nfs.writeFileSync(tmpPrompt, JSON.stringify(promptInput), 'utf8');\n\nreturn {\n  json: {\n    lineUserId: chunksData.lineUserId,\n    messageText: chunksData.messageText,\n    replyToken: chunksData.replyToken,\n    chunks: chunksData.chunks,\n    chunkIds: chunksData.chunkIds,\n    history: history,\n    sessionTurns: turns,\n    _tmp_prompt: tmpPrompt\n  }\n};"
+      },
+      "notes": "Checks allowed_users whitelist. If unauthorized: sends LINE reply '您無使用權限' via $helpers.httpRequest, returns null to stop workflow. If authorized: merges chunks+history, writes prompt_builder input to temp file (_tmp_prompt path stored in output JSON)."
+    },
+    {
+      "id": "qa-node-010",
+      "name": "Execute: prompt_builder",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2500, 300],
+      "parameters": {
+        "command": "python -c \"import subprocess,sys,os;pd=os.environ.get('PROJECT_ROOT','.');r=subprocess.run([sys.executable,os.path.join(pd,'scripts','prompt_builder.py')],stdin=open(r'{{ $json._tmp_prompt }}',encoding='utf-8'),capture_output=True,cwd=pd);sys.stdout.buffer.write(r.stdout);sys.exit(r.returncode)\"",
+        "cwd": "={{ $env.PROJECT_ROOT }}"
+      },
+      "notes": "Reads {question, chunks, history} JSON from temp file and pipes to prompt_builder.py stdin. prompt_builder.py assembles RAG prompt with conversation history and reference chunks. Output: {system: '...', prompt: '...'}."
+    },
+    {
+      "id": "qa-node-011",
+      "name": "Parse Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2750, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Clean up temp file\nconst fs = require('fs');\ntry { fs.unlinkSync($('Check Auth').first().json._tmp_prompt); } catch(e) {}\n\nif ($input.item.json.exitCode !== 0) {\n  throw new Error('prompt_builder.py failed (exit ' + $input.item.json.exitCode + '): ' + ($input.item.json.stderr || ''));\n}\nlet promptData;\ntry { promptData = JSON.parse($input.item.json.stdout); } catch(e) {\n  throw new Error('Failed to parse prompt_builder.py output: ' + e.message);\n}\nconst prevData = $('Check Auth').first().json;\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    systemPrompt: promptData.system || '',\n    userPrompt: promptData.prompt || ''\n  }\n};"
+      },
+      "notes": "Deletes temp file, parses prompt_builder.py output. Throws on failure (triggers Error Trigger). Carries systemPrompt and userPrompt forward for Ollama node."
+    },
+    {
+      "id": "qa-node-012",
+      "name": "Ollama Chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3000, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.OLLAMA_BASE_URL || 'http://localhost:11434') + '/api/chat' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({model: $env.OLLAMA_CHAT_MODEL || 'qwen2.5', messages: [{role: 'system', content: $json.systemPrompt}, {role: 'user', content: $json.userPrompt}], stream: false}) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "notes": "POST to Ollama /api/chat with model=qwen2.5, stream=false. Timeout 120s for long LLM inference. Response: {model, message: {role, content}, done: true, ...}. Uses OLLAMA_BASE_URL and OLLAMA_CHAT_MODEL env vars."
+    },
+    {
+      "id": "qa-node-013",
+      "name": "Extract Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3250, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const response = $input.item.json;\n// Ollama /api/chat response: {message: {role, content}, done, ...}\nconst answer = (response.message && response.message.content) || response.response || '';\nconst prevData = $('Parse Prompt').first().json;\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    answer: answer || '抱歉，目前無法生成回答，請稍後再試。'\n  }\n};"
+      },
+      "notes": "Extracts answer from Ollama response.message.content (api/chat) or response.response (api/generate). Falls back to hardcoded message if empty."
+    },
+    {
+      "id": "qa-node-014",
+      "name": "LINE Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [3500, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.LINE_CHANNEL_ACCESS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({replyToken: $json.replyToken, messages: [{type: 'text', text: $json.answer}]}) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notes": "POST to LINE Reply API with replyToken and answer text. Authorization: Bearer {LINE_CHANNEL_ACCESS_TOKEN}. replyToken expires after ~1 minute of the original event."
+    },
+    {
+      "id": "qa-node-015",
+      "name": "Post-Reply Processing",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3750, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const extractData = $('Extract Answer').first().json;\nconst msgData = $('Parse Message').first().json;\n\n// Build updated turns: old turns + new user/assistant turn, keep last 10 (5 rounds)\nconst oldTurns = Array.isArray(extractData.sessionTurns) ? extractData.sessionTurns : [];\nconst newTurns = oldTurns.concat([\n  { role: 'user', content: extractData.messageText },\n  { role: 'assistant', content: extractData.answer }\n]).slice(-10);\n\n// Format chunk_ids as PostgreSQL UUID array literal: {uuid1,uuid2,...}\n// Required for ::uuid[] cast in INSERT qa_logs\nconst chunkIds = Array.isArray(extractData.chunkIds) ? extractData.chunkIds : [];\nconst chunkIdsArray = chunkIds.length > 0 ? '{' + chunkIds.join(',') + '}' : '{}';\n\nreturn {\n  json: {\n    lineUserId: extractData.lineUserId,\n    messageText: extractData.messageText,\n    answer: extractData.answer,\n    newTurnsJson: JSON.stringify(newTurns),\n    chunkIdsArray: chunkIdsArray\n  }\n};"
+      },
+      "notes": "Prepares data for both PostgreSQL updates: (1) newTurnsJson = JSON string of updated conversation turns trimmed to 10 turns (5 rounds); (2) chunkIdsArray = PostgreSQL array literal string '{uuid1,uuid2}' for ::uuid[] cast in qa_logs INSERT."
+    },
+    {
+      "id": "qa-node-016",
+      "name": "Update conversation_sessions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [4000, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO conversation_sessions (line_user_id, turns)\nVALUES ($1, $2::jsonb)\nON CONFLICT (line_user_id)\nDO UPDATE SET turns = EXCLUDED.turns, updated_at = NOW()",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.lineUserId, $json.newTurnsJson]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "PostgreSQL - vectordb"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "UPSERT conversation session. $2 is newTurnsJson (JSON string of turns array), cast to jsonb in SQL. continueOnFail=true so qa_logs INSERT is not blocked by session update failure."
+    },
+    {
+      "id": "qa-node-017",
+      "name": "Insert qa_logs",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [4250, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO qa_logs (user_id, question, retrieved_chunk_ids, answer)\nVALUES ($1, $2, $3::uuid[], $4)",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.lineUserId, $json.messageText, $json.chunkIdsArray, $json.answer]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "PostgreSQL - vectordb"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Inserts QA log. $3 is chunkIdsArray formatted as '{uuid1,uuid2}' PostgreSQL array literal, cast to uuid[] in SQL. continueOnFail=true so a log insert failure does not surface as workflow error."
+    },
+    {
+      "id": "qa-node-018",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [250, 700],
+      "parameters": {},
+      "notes": "Fires when any node in this workflow throws an unhandled error. Receives execution context: $json.execution.error.message, $json.execution.lastNodeExecuted, $json.workflow.id. Cannot send LINE reply (replyToken unavailable) — logs error to processing_logs only."
+    },
+    {
+      "id": "qa-node-019",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [500, 700],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO processing_logs (file_name, step_name, log_level, message, details)\nVALUES ('LINE QA', $1, 'error', $2, $3::jsonb)",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.execution.lastNodeExecuted, $json.execution.error.message || 'Unknown error', JSON.stringify({workflowId: $json.workflow.id, executionId: $json.execution.id, errorDescription: $json.execution.error.description, stack: $json.execution.error.stack})]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "POSTGRES_CRED_ID",
+          "name": "PostgreSQL - vectordb"
+        }
+      },
+      "notes": "Logs workflow error to processing_logs. step_name = lastNodeExecuted, message = error message, details = full error JSON. To also send LINE error reply, you would need to store replyToken in n8n workflow static data at an early stage."
+    }
+  ],
+  "connections": {
+    "LINE Webhook": {
+      "main": [
+        [{ "node": "Execute: line_verify", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute: line_verify": {
+      "main": [
+        [{ "node": "Parse Verify", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Verify": {
+      "main": [
+        [{ "node": "Parse Message", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Message": {
+      "main": [
+        [{ "node": "Execute: vector_search", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute: vector_search": {
+      "main": [
+        [{ "node": "Parse Chunks", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Chunks": {
+      "main": [
+        [{ "node": "Query conversation_sessions", "type": "main", "index": 0 }]
+      ]
+    },
+    "Query conversation_sessions": {
+      "main": [
+        [{ "node": "Query allowed_users", "type": "main", "index": 0 }]
+      ]
+    },
+    "Query allowed_users": {
+      "main": [
+        [{ "node": "Check Auth", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Auth": {
+      "main": [
+        [{ "node": "Execute: prompt_builder", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute: prompt_builder": {
+      "main": [
+        [{ "node": "Parse Prompt", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Prompt": {
+      "main": [
+        [{ "node": "Ollama Chat", "type": "main", "index": 0 }]
+      ]
+    },
+    "Ollama Chat": {
+      "main": [
+        [{ "node": "Extract Answer", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Answer": {
+      "main": [
+        [{ "node": "LINE Reply", "type": "main", "index": 0 }]
+      ]
+    },
+    "LINE Reply": {
+      "main": [
+        [{ "node": "Post-Reply Processing", "type": "main", "index": 0 }]
+      ]
+    },
+    "Post-Reply Processing": {
+      "main": [
+        [{ "node": "Update conversation_sessions", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update conversation_sessions": {
+      "main": [
+        [{ "node": "Insert qa_logs", "type": "main", "index": 0 }]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [{ "node": "Log Error", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "line-qa-assistant-v1"
+  },
+  "pinData": {}
+}
