@@ -4,7 +4,8 @@
  * Runs ESLint before allowing git commit to ensure code quality
  */
 
-import { appendFileSync } from 'fs';
+import { appendFileSync, existsSync } from 'fs';
+import { join } from 'path';
 import { execSync } from 'child_process';
 
 interface ToolInput {
@@ -84,6 +85,15 @@ function main(): void {
         logDebug(`Is git commit: ${isGitCommit}`);
 
         if (isGitCommit) {
+          // Skip lint if no package.json (non-JS/TS project)
+          const pkgPath = join(cwd, 'package.json');
+          if (!existsSync(pkgPath)) {
+            logDebug('No package.json found - skipping lint check');
+            console.log(JSON.stringify({}));
+            logDebug('=== LINT HOOK COMPLETED (SKIPPED - no package.json) ===');
+            return;
+          }
+
           logDebug('Git commit detected - running lint check...');
           const { success, output } = runLint(cwd);
 

@@ -1,0 +1,21 @@
+# Task 2: 文字抽取腳本 extract_text.py
+
+- [x] 建立 `scripts/requirements.txt`（含 python-docx, pypdf, openpyxl, pytesseract, Pillow, pdf2image==1.17.0, psycopg2-binary, requests, fpdf2==2.7.9）
+- [x] 安裝前置工具確認：`tesseract --version` 與 `pdftoppm -v`（Tesseract + Poppler）；若缺少輸出安裝指令提示
+  - ⚠️ tesseract 未安裝。Windows 安裝：https://github.com/UB-Mannheim/tesseract/wiki 下載安裝，並加入 PATH
+  - ⚠️ pdftoppm (Poppler) 未安裝。Windows 安裝：https://github.com/oschwartz10612/poppler-windows/releases 解壓後加入 PATH
+  - OCR 功能在安裝後才可正常使用；其餘功能不受影響
+- [x] 安裝 Python 套件：`pip install -r scripts/requirements.txt`
+- [x] 建立 `scripts/extract_text.py`，實作以下功能：
+    - calc_hash(file_path) → SHA-256
+    - extract_word(.docx) → 正文 + 表格文字
+    - extract_pdf(.pdf) → 直接抽文字；若空值改呼叫 extract_pdf_ocr（用 pdf2image + pytesseract，lang=chi_tra+eng）
+    - extract_excel(.xlsx/.xls) → 各 sheet 文字，保留 sheet_name
+    - extract_image(.jpg/.jpeg/.png) → pytesseract OCR
+    - main() → 輸出 JSON {text, metadata{file_name,file_ext,file_path,file_size,hash_sha256}, ocr_used, page_count}
+- [x] 建立 test_data/sample.docx（用 python-docx 建立含標題與段落的最小測試檔）
+- [x] 執行 `python scripts/extract_text.py test_data/sample.docx` 驗證輸出包含正確 text 與 metadata
+  - text: 測試文件\n這是一個測試段落，包含中文內容。（UTF-8 正確）
+  - metadata: file_name=sample.docx, hash_sha256 64 chars, ocr_used=False, page_count=1
+- [x] git commit scripts/extract_text.py, scripts/requirements.txt, test_data/sample.docx
+  - commit: 31cc497

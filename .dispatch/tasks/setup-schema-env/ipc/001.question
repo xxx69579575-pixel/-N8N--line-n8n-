@@ -1,0 +1,9 @@
+Ollama 目前沒有安裝 nomic-embed-text 或 bge-m3 embedding 模型（已確認只有 qwen2.5 聊天模型）。
+
+請問您打算使用哪個 embedding 模型？
+1. nomic-embed-text（維度 768）
+2. bge-m3（維度 1024）
+
+現有的 02_postgresql_schema.sql 使用 VECTOR(1024)，對應 bge-m3。
+
+請回答 "768" 或 "1024"，或直接告知模型名稱。
