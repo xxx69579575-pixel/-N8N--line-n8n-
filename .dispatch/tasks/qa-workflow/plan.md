@@ -28,4 +28,5 @@
   <!-- PROJECT_ROOT, LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET, OLLAMA_BASE_URL, OLLAMA_CHAT_MODEL, POSTGRES_* 皆已列在 _comments.required_env_vars -->
 - [x] 建立 allowed_users 表 DDL 並補入 sql/01_schema.sql
   <!-- DDL 追加至 sql/01_schema.sql 末尾；docker exec pg_container psql 建立實際資料表與 unique index 成功 -->
-- [ ] git commit workflows/qa_workflow.json, sql/01_schema.sql
+- [x] git commit workflows/qa_workflow.json, sql/01_schema.sql
+  <!-- commit 97f470f: feat: add workflows/qa_workflow.json — LINE QA Assistant n8n workflow + allowed_users table -->
