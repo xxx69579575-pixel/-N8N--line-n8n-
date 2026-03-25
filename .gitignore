@@ -1,0 +1,16 @@
+# Environment variables (sensitive)
+config/.env
+.env
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+
+# Temp
+tmp_prompt_*.txt
