@@ -9,9 +9,23 @@ services:
       - N8N_HOST=0.0.0.0
       - N8N_PORT=5678
       - N8N_PROTOCOL=http
-      - WEBHOOK_URL=http://localhost:5681
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_VERSION_NOTIFICATIONS_ENABLED=false
+      - WEBHOOK_URL=https://dayton-allan-temple-roots.trycloudflare.com
       - GENERIC_TIMEZONE=Asia/Taipei
       - TZ=Asia/Taipei
+      # LINE Messaging API
+      - LINE_CHANNEL_ACCESS_TOKEN=zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=
+      - LINE_CHANNEL_SECRET=78c4e44968cfc0353a7bd41e1d69c4cc
+      # Ollama — host machine
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_CHAT_MODEL=qwen2.5:7b-instruct-q4_0
+      # PostgreSQL — host machine (pg_container port 65432)
+      - POSTGRES_HOST=host.docker.internal
+      - POSTGRES_PORT=65432
+      - POSTGRES_DB=vectordb
+      - POSTGRES_USER=testuser
+      - POSTGRES_PASSWORD=testpwd
     volumes:
       - n8n_data:/home/node/.n8n
       - D:/n8n/CLAUDE 實做/本地AI企業問答助理:/workspace
