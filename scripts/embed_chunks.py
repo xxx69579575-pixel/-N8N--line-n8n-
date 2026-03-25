@@ -25,14 +25,13 @@ OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "bge-m3")
 
 
 def embed_text(text: str) -> list[float]:
-    # Ollama ≥0.1.x uses /api/embeddings with {"model":..., "prompt":...}
-    # Response: {"embedding": [...]}
-    url = f"{OLLAMA_BASE_URL}/api/embeddings"
-    payload = json.dumps({"model": OLLAMA_EMBED_MODEL, "prompt": text}).encode("utf-8")
+    # Use /api/embed (new API) with "input" key — must match vector_search.py query API
+    url = f"{OLLAMA_BASE_URL}/api/embed"
+    payload = json.dumps({"model": OLLAMA_EMBED_MODEL, "input": text}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
     try:
@@ -42,11 +41,11 @@ def embed_text(text: str) -> list[float]:
         print(f"ERROR: Cannot reach Ollama at {url}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    embedding = result.get("embedding")
-    if not embedding:
+    embeddings = result.get("embeddings")
+    if not embeddings or not embeddings[0]:
         print(f"ERROR: Unexpected Ollama response: {result}", file=sys.stderr)
         sys.exit(1)
-    return embedding
+    return embeddings[0]
 
 
 def main():

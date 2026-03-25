@@ -66,12 +66,13 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "testpwd")
 # ---------------------------------------------------------------------------
 
 def get_embedding(text: str) -> list:
-    url = f"{OLLAMA_BASE_URL}/api/embeddings"
-    payload = json.dumps({"model": OLLAMA_EMBED_MODEL, "prompt": text}).encode("utf-8")
+    # Use /api/embed (new API) with "input" key — must match how embed_chunks.py stores vectors
+    url = f"{OLLAMA_BASE_URL}/api/embed"
+    payload = json.dumps({"model": OLLAMA_EMBED_MODEL, "input": text}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json; charset=utf-8"},
         method="POST",
     )
     try:
@@ -81,11 +82,11 @@ def get_embedding(text: str) -> list:
         print(f"ERROR: Cannot reach Ollama at {url}: {e}", file=sys.stderr)
         sys.exit(1)
 
-    embedding = result.get("embedding")
-    if not embedding:
+    embeddings = result.get("embeddings")
+    if not embeddings or not embeddings[0]:
         print(f"ERROR: Unexpected Ollama response: {result}", file=sys.stderr)
         sys.exit(1)
-    return embedding
+    return embeddings[0]
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,7 @@ LIMIT %s;
 
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SET ivfflat.probes = 50")
             cur.execute(sql, (
                 vec_literal, vec_literal, min_sim,
                 department, department,
