@@ -96,7 +96,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: 0.7}) }}",
+        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: 0.5}) }}",
         "options": {
           "timeout": 60000
         }
