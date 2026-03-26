@@ -11,13 +11,13 @@
         "rule": {
           "interval": [
             {
-              "field": "minutes",
-              "minutesInterval": 5
+              "field": "hours",
+              "hoursInterval": 1
             }
           ]
         }
       },
-      "notes": "每 5 分鐘掃描一次收件匣。可依需求調整間隔。"
+      "notes": "每 1 小時掃描一次收件匣。"
     },
     {
       "id": "ingest-node-001b",
@@ -100,7 +100,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({file_path: $json.file_path, department: $json.department || 'general'}) }}",
+        "body": "={{ JSON.stringify({file_path: $json.file_path, department: $json.department || $json.file_path.split('/').slice(-2,-1)[0] || 'general'}) }}",
         "options": {
           "timeout": 300000
         }
