@@ -130,7 +130,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const sessionData = $input.item.json;\nconst msgData = $('Parse Message').first().json;\n\n// Parse turns safely\nlet sessionTurns = [];\ntry {\n  const rawTurns = sessionData.turns;\n  if (Array.isArray(rawTurns)) sessionTurns = rawTurns;\n  else if (typeof rawTurns === 'string') sessionTurns = JSON.parse(rawTurns);\n} catch(e) { sessionTurns = []; }\n\nconst mode = sessionData.mode || null;\nconst text = (msgData.messageText || '').trim();\n\n// File type label → internal key mapping\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\n\nif (mode === 'waiting_filetype') {\n  // User is selecting a file type from Quick Reply\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa'; // not a valid type, fall back to QA\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  // User is typing a search keyword (type already chosen)\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1] || '';\n} else if (text === '\\u627E\\u6A94\\u6848') {\n  // User tapped Rich Menu or Quick Reply '找檔案'\n  intent = 'file_search_menu';\n} else {\n  // Normal QA (includes '問問題')\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: msgData.lineUserId,\n    messageText: msgData.messageText,\n    replyToken: msgData.replyToken,\n    intent: intent,\n    keyword: keyword,\n    fileType: fileType,\n    sessionTurns: sessionTurns,\n    sessionMode: mode\n  }\n};"
+        "jsCode": "const parsedMsg = $('Parse Message').first().json;\nconst text = parsedMsg.messageText || '';\nconst sessionData = $input.item.json;\nconst mode = sessionData.mode || null;\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\nlet askFileName = '';\n\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\nif (text.startsWith('\\u554f:')) {\n  intent = 'ask_about_file';\n  askFileName = text.slice(2).trim();\n} else if (mode && mode.startsWith('asking_about:')) {\n  intent = 'file_qa';\n  askFileName = mode.slice('asking_about:'.length);\n  keyword = text;\n} else if (mode === 'waiting_filetype') {\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa';\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1];\n} else if (text === '\\u627e\\u6a94\\u6848') {\n  intent = 'file_search_menu';\n} else {\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: parsedMsg.lineUserId,\n    messageText: text,\n    replyToken: parsedMsg.replyToken,\n    sessionMode: mode,\n    sessionTurns: sessionData.turns || [],\n    intent,\n    keyword,\n    fileType,\n    askFileName,\n  }\n};"
       },
       "notes": "Determines intent: 'qa' (RAG), 'file_search_execute' (when mode=waiting_keyword), 'file_search_menu' (when text='找檔案'). Sets keyword for file_search_execute."
     },
@@ -166,7 +166,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const authResult = $input.item.json;\nconst intentData = $('Intent Router').first().json;\n\nif (!authResult.authorized) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.line.me/v2/bot/message/reply',\n      headers: {\n        'Authorization': 'Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=',\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({\n        replyToken: intentData.replyToken,\n        messages: [{ type: 'text', text: '您無使用權限' }]\n      })\n    });\n  } catch(e) {}\n  return null;\n}\n\n// Authorized — pass intent data through\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    messageText: intentData.messageText,\n    replyToken: intentData.replyToken,\n    intent: intentData.intent,\n    keyword: intentData.keyword,\n    sessionTurns: intentData.sessionTurns\n  }\n};"
+        "jsCode": "const authResult = $input.item.json;\nconst intentData = $('Intent Router').first().json;\n\nif (!authResult.authorized) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.line.me/v2/bot/message/reply',\n      headers: {\n        'Authorization': 'Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=',\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({\n        replyToken: intentData.replyToken,\n        messages: [{ type: 'text', text: '\\u60a8\\u7121\\u4f7f\\u7528\\u6b0a\\u9650' }]\n      })\n    });\n  } catch(e) {}\n  return null;\n}\n\n// Authorized - pass intent data through\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    messageText: intentData.messageText,\n    replyToken: intentData.replyToken,\n    sessionMode: intentData.sessionMode,\n    sessionTurns: intentData.sessionTurns,\n    intent: intentData.intent,\n    keyword: intentData.keyword,\n    fileType: intentData.fileType,\n    askFileName: intentData.askFileName,\n  }\n};"
       },
       "notes": "Checks auth. If unauthorized: sends LINE reply and returns null. If authorized: passes intent data through for Switch routing."
     },
@@ -181,10 +181,11 @@
       ],
       "parameters": {
         "mode": "expression",
-        "output": "={{ $json.intent === 'file_search_execute' ? 1 : $json.intent === 'file_search_menu' ? 2 : $json.intent === 'file_type_selected' ? 3 : 0 }}",
+        "output": "={{ $json.intent === 'file_search_execute' ? 1 : ($json.intent === 'file_search_menu' || $json.intent === 'ask_about_file') ? 2 : $json.intent === 'file_type_selected' ? 3 : 0 }}",
+        "outputsAmount": 4,
         "options": {}
       },
-      "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu, 3=file_type_selected"
+      "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu, 3=file_type_selected, 4=ask_about_file, 5=file_qa"
     },
     {
       "id": "qa-node-005",
@@ -202,7 +203,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 8, min_sim: 0.3}) }}",
+        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: 0.5, file_name: $json.askFileName || ''}) }}",
         "options": {
           "timeout": 60000
         }
@@ -459,7 +460,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// TODO: Update PUBLIC_API_BASE_URL to your Named Tunnel URL once configured\nconst PUBLIC_API_BASE_URL = 'https://peninsula-logo-seriously-chronic.trycloudflare.com'; // Cloudflare Quick Tunnel\n\nconst resp = $input.item.json;\nconst intentData = $('Intent Router').first().json;\nconst results = (resp && Array.isArray(resp.results)) ? resp.results : [];\nconst keyword = intentData.keyword || '';\n\nlet replyText;\nif (results.length === 0) {\n  replyText = '\\u627E\\u4E0D\\u5230\\u5305\\u542B\\u300C' + keyword + '\\u300D\\u7684\\u6A94\\u6848\\u3002\\n\\n\\u8ACB\\u5617\\u8A66\\u5176\\u4ED6\\u95DC\\u9375\\u5B57\\uFF0C\\u6216\\u8F38\\u5165\\u300C\\u627E\\u6A94\\u6848\\u300D\\u91CD\\u8A66\\u3002';\n} else {\n  const lines = ['\\u627E\\u5230 ' + results.length + ' \\u500B\\u76F8\\u95DC\\u6A94\\u6848\\uFF1A\\n'];\n  results.slice(0, 10).forEach(function(r, i) {\n    const url = PUBLIC_API_BASE_URL + r.download_url;\n    lines.push((i + 1) + '. ' + r.file_name);\n    lines.push('   \\u4E0B\\u8F09\\uFF1A' + url);\n  });\n  if (results.length > 10) {\n    lines.push('\\n\\uFF08\\u5171 ' + results.length + ' \\u7B46\\uFF0C\\u986F\\u793A\\u524D 10 \\u7B46\\uFF09');\n  }\n  replyText = lines.join('\\n');\n}\n\n// Build reply body with quickReply using unicode escapes (avoid emoji in expression engine)\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{\n    type: 'text',\n    text: replyText,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u518D\\u627E\\u4E00\\u6B21', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    replyToken: intentData.replyToken,\n    replyText: replyText,\n    replyBody: replyBody\n  }\n};"
+        "jsCode": "const PUBLIC_API_BASE_URL = 'https://peninsula-logo-seriously-chronic.trycloudflare.com';\n\nconst resp = $input.item.json;\nconst intentData = $('Intent Router').first().json;\nconst results = (resp && Array.isArray(resp.results)) ? resp.results : [];\nconst keyword = intentData.keyword || '';\n\nlet replyText;\nif (results.length === 0) {\n  replyText = '\\u627e\\u4e0d\\u5230\\u5305\\u542b\\u300c' + keyword + '\\u300d\\u7684\\u6a94\\u6848\\u3002\\n\\n\\u8acb\\u5617\\u8a66\\u5176\\u4ed6\\u95dc\\u9375\\u5b57\\uff0c\\u6216\\u8f38\\u5165\\u300c\\u627e\\u6a94\\u6848\\u300d\\u91cd\\u8a66\\u3002';\n} else {\n  const lines = ['\\u627e\\u5230 ' + results.length + ' \\u500b\\u76f8\\u95dc\\u6a94\\u6848\\uff1a\\n'];\n  results.slice(0, 10).forEach(function(r, i) {\n    const url = PUBLIC_API_BASE_URL + r.download_url;\n    lines.push((i + 1) + '. ' + r.file_name);\n    lines.push('   \\u4e0b\\u8f09\\uff1a' + url);\n  });\n  if (results.length > 10) {\n    lines.push('\\n\\uff08\\u5171 ' + results.length + ' \\u7b46\\uff0c\\u986f\\u793a\\u524d 10 \\u7b46\\uff09');\n  }\n  replyText = lines.join('\\n');\n}\n\n// Build per-file \"問此檔案\" quick reply items (max 3 files)\nconst fileQRItems = results.slice(0, 3).map(function(r, i) {\n  const label = '\\u554f: ' + r.file_name.slice(0, 17);  // \"問: \" + up to 17 chars = max 20\n  return {\n    type: 'action',\n    action: {\n      type: 'message',\n      label: label,\n      text: '\\u554f:' + r.file_name  // \"問:<filename>\" sent as message\n    }\n  };\n});\n\nconst standardQRItems = [\n  { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u518d\\u627e\\u4e00\\u6b21', text: '\\u627e\\u6a94\\u6848' } },\n  { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554f\\u554f\\u984c', text: '\\u554f\\u554f\\u984c' } }\n];\n\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{\n    type: 'text',\n    text: replyText,\n    quickReply: {\n      items: [...fileQRItems, ...standardQRItems]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    replyToken: intentData.replyToken,\n    replyText: replyText,\n    replyBody: replyBody\n  }\n};"
       },
       "notes": "Formats file search results as LINE text message. PUBLIC_API_BASE_URL must be updated to Named Tunnel URL for users to download via LINE."
     },
@@ -698,6 +699,112 @@
       "notes": "Sets mode='waiting_keyword:pdf' (or docx/xlsx/jpg). Next message will be keyword for file search."
     },
     {
+      "id": "qa-node-032",
+      "name": "LINE Reply: Ask File Q",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        700
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ir = $('Intent Router').first().json;\nconst fname = ir.askFileName || '';\nconst replyBody = JSON.stringify({\n  replyToken: ir.replyToken,\n  messages: [{\n    type: 'text',\n    text: '\\u60a8\\u60f3\\u554f\\u95dc\\u65bc\\u300c' + fname + '\\u300d\\u7684\\u4ec0\\u9ebc\\u554f\\u984c\\uff1f',\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u627e\\u6a94\\u6848', text: '\\u627e\\u6a94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554f\\u554f\\u984c', text: '\\u554f\\u554f\\u984c' } }\n      ]\n    }\n  }]\n});\nreturn { json: { lineUserId: ir.lineUserId, replyToken: ir.replyToken, replyBody } };"
+      }
+    },
+    {
+      "id": "qa-node-032b",
+      "name": "LINE Reply Send: Ask File Q",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3400,
+        700
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.replyBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      }
+    },
+    {
+      "id": "qa-node-033-prep",
+      "name": "Prep: Set Ask Mode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3600,
+        700
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ir = $('Intent Router').first().json;\nreturn { json: { lineUserId: ir.lineUserId, askFileName: ir.askFileName } };"
+      }
+    },
+    {
+      "id": "qa-node-033",
+      "name": "Update Session: Set Ask Mode",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        3800,
+        700
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$json.lineUserId}', '[]'::jsonb, 'asking_about:${$json.askFileName}') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'asking_about:${$json.askFileName}', updated_at = NOW()` }}",
+        "options": {}
+      },
+      "continueOnFail": true,
+      "credentials": {
+        "postgres": {
+          "id": "d1sS4zldfDUxHn2j",
+          "name": "PostgreSQL vectordb"
+        }
+      }
+    },
+    {
+      "id": "qa-node-034",
+      "name": "Execute: vector_search_file",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3200,
+        900
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/vector-search",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({question: $('Intent Router').first().json.keyword || '', top_k: 5, min_sim: 0.5, file_name: $('Intent Router').first().json.askFileName || ''}) }}",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
       "id": "qa-node-018",
       "name": "Error Trigger",
       "type": "n8n-nodes-base.errorTrigger",
@@ -732,6 +839,37 @@
         }
       },
       "notes": "Logs workflow errors to processing_logs."
+    },
+    {
+      "id": "qa-node-if-ask-file",
+      "name": "Route: File Menu vs Ask File",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        700
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-001",
+              "leftValue": "={{ $('Intent Router').first().json.intent }}",
+              "rightValue": "ask_about_file",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
     }
   ],
   "connections": {
@@ -841,7 +979,7 @@
         ],
         [
           {
-            "node": "LINE Reply: Select File Type",
+            "node": "Route: File Menu vs Ask File",
             "type": "main",
             "index": 0
           }
@@ -1069,6 +1207,68 @@
         [
           {
             "node": "Update Session: Set Keyword Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LINE Reply: Ask File Q": {
+      "main": [
+        [
+          {
+            "node": "LINE Reply Send: Ask File Q",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LINE Reply Send: Ask File Q": {
+      "main": [
+        [
+          {
+            "node": "Prep: Set Ask Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep: Set Ask Mode": {
+      "main": [
+        [
+          {
+            "node": "Update Session: Set Ask Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute: vector_search_file": {
+      "main": [
+        [
+          {
+            "node": "Parse Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route: File Menu vs Ask File": {
+      "main": [
+        [
+          {
+            "node": "LINE Reply: Ask File Q",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LINE Reply: Select File Type",
             "type": "main",
             "index": 0
           }

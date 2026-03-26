@@ -93,7 +93,7 @@ def get_embedding(text: str) -> list:
 # pgvector search (pure-stdlib socket-based psycopg2 alternative)
 # ---------------------------------------------------------------------------
 
-def vector_search(embedding: list, top_k: int, min_sim: float, department: str) -> list:
+def vector_search(embedding: list, top_k: int, min_sim: float, department: str, file_name: str = "") -> list:
     try:
         import psycopg2
         import psycopg2.extras
@@ -114,6 +114,7 @@ JOIN documents d ON dc.document_id = d.id
 JOIN document_permissions dp ON dc.document_id = dp.document_id
 WHERE 1 - (dc.embedding <=> %s::vector) >= %s
   AND (%s = '' OR dp.department = %s)
+  AND (%s = '' OR d.file_name = %s)
 ORDER BY dc.embedding <=> %s::vector
 LIMIT %s;
 """
@@ -136,6 +137,7 @@ LIMIT %s;
             cur.execute(sql, (
                 vec_literal, vec_literal, min_sim,
                 department, department,
+                file_name, file_name,
                 vec_literal, top_k,
             ))
             rows = cur.fetchall()
@@ -167,14 +169,15 @@ def main():
     parser.add_argument("--top-k", type=int, default=5, dest="top_k", help="Number of results (default: 5)")
     parser.add_argument("--min-sim", type=float, default=0.7, dest="min_sim", help="Minimum similarity threshold (default: 0.7)")
     parser.add_argument("--department", default="", help="Filter by department (optional)")
+    parser.add_argument("--file-name", default="", dest="file_name", help="Filter by exact file name (optional)")
     args = parser.parse_args()
 
     print(f"Embedding question with model '{OLLAMA_EMBED_MODEL}'…", file=sys.stderr)
     embedding = get_embedding(args.question)
     print(f"Embedding dimension: {len(embedding)}", file=sys.stderr)
 
-    print(f"Searching top_k={args.top_k} min_sim={args.min_sim} department='{args.department}'…", file=sys.stderr)
-    results = vector_search(embedding, args.top_k, args.min_sim, args.department)
+    print(f"Searching top_k={args.top_k} min_sim={args.min_sim} department='{args.department}' file_name='{args.file_name}'…", file=sys.stderr)
+    results = vector_search(embedding, args.top_k, args.min_sim, args.department, args.file_name)
 
     print(f"Found {len(results)} result(s).", file=sys.stderr)
     output = json.dumps(results, ensure_ascii=False, indent=2)

@@ -160,6 +160,7 @@ class APIHandler(BaseHTTPRequestHandler):
         top_k = str(int(data.get("top_k", 5)))
         min_sim = str(float(data.get("min_sim", 0.7)))
         department = str(data.get("department", ""))
+        file_name = str(data.get("file_name", ""))
 
         args = [
             sys.executable, str(_SCRIPT_DIR / "vector_search.py"),
@@ -169,6 +170,8 @@ class APIHandler(BaseHTTPRequestHandler):
         ]
         if department:
             args += ["--department", department]
+        if file_name:
+            args += ["--file-name", file_name]
 
         result = self.run_script(args)
 
