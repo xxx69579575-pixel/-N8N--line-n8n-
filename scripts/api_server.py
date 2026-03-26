@@ -329,24 +329,47 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": str(e)})
 
     def _handle_list_inbox(self):
-        """GET /list-inbox — scan INGEST_INBOX_DIR, return pending files."""
+        """GET /list-inbox — scan INGEST_INBOX_DIR (including subfolders as department).
+
+        Folder structure:
+            inbox/                    → department = 'general'
+            inbox/安全規範/           → department = '安全規範'
+            inbox/工安報告/2026/      → department = '工安報告'  (first-level subfolder name)
+        Skips: processed/, error/, and hidden folders (starting with .)
+        """
         inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
         if not inbox_dir or not os.path.isdir(inbox_dir):
             self.send_json(200, {"files": [], "count": 0, "inbox_dir": inbox_dir, "warning": "INGEST_INBOX_DIR not set or not found"})
             return
 
         supported = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".jpg", ".jpeg", ".png"}
+        skip_dirs = {"processed", "error"}
         files = []
-        for fname in os.listdir(inbox_dir):
-            ext = os.path.splitext(fname)[1].lower()
-            if ext in supported:
-                fpath = os.path.join(inbox_dir, fname)
+
+        for root, dirs, fnames in os.walk(inbox_dir):
+            # Prune skipped and hidden directories in-place
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+
+            # Determine department from first-level subfolder name
+            rel = os.path.relpath(root, inbox_dir)
+            if rel == ".":
+                department = "general"
+            else:
+                department = rel.split(os.sep)[0]  # first-level folder only
+
+            for fname in fnames:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in supported:
+                    continue
+                fpath = os.path.join(root, fname)
                 files.append({
                     "file_name": fname,
                     "file_path": fpath,
                     "file_ext": ext,
                     "file_size": os.path.getsize(fpath),
+                    "department": department,
                 })
+
         self.send_json(200, {"files": files, "count": len(files), "inbox_dir": inbox_dir})
 
     def _handle_ingest_file(self, data: dict):
