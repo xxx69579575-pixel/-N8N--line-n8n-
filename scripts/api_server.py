@@ -250,11 +250,21 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": str(e)})
 
     def _handle_search_files(self, data: dict):
-        """POST /search-files  {keyword} -> {results: [{file_name, file_path, download_url}], count}"""
+        """POST /search-files  {keyword, file_type?} -> {results: [{file_name, file_path, download_url}], count}"""
         keyword = data.get("keyword", "")
         if not keyword:
             self.send_json(400, {"error": "Missing required field: keyword"})
             return
+
+        # Optional file type filter: pdf, docx, xlsx, jpg
+        file_type = str(data.get("file_type", "")).lower().strip()
+        ext_map = {
+            "pdf":  [".pdf"],
+            "docx": [".doc", ".docx"],
+            "xlsx": [".xls", ".xlsx"],
+            "jpg":  [".jpg", ".jpeg"],
+        }
+        ext_list = ext_map.get(file_type, [])
 
         try:
             import psycopg2  # type: ignore
@@ -272,10 +282,23 @@ class APIHandler(BaseHTTPRequestHandler):
             )
             try:
                 with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT file_name, file_path FROM documents WHERE file_name ILIKE %s ORDER BY file_name LIMIT 50",
-                        (f"%{keyword}%",),
-                    )
+                    if ext_list:
+                        # Build OR conditions for each extension
+                        ext_clauses = " OR ".join(
+                            [f"LOWER(file_name) LIKE %s" for _ in ext_list]
+                        )
+                        sql = (
+                            f"SELECT file_name, file_path FROM documents "
+                            f"WHERE file_name ILIKE %s AND ({ext_clauses}) "
+                            f"ORDER BY file_name LIMIT 50"
+                        )
+                        params = [f"%{keyword}%"] + [f"%{ext}" for ext in ext_list]
+                        cur.execute(sql, params)
+                    else:
+                        cur.execute(
+                            "SELECT file_name, file_path FROM documents WHERE file_name ILIKE %s ORDER BY file_name LIMIT 50",
+                            (f"%{keyword}%",),
+                        )
                     rows = cur.fetchall()
             finally:
                 conn.close()

@@ -112,7 +112,7 @@
       "position": [1500, 300],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const sessionData = $input.item.json;\nconst msgData = $('Parse Message').first().json;\n\n// Parse turns safely\nlet sessionTurns = [];\ntry {\n  const rawTurns = sessionData.turns;\n  if (Array.isArray(rawTurns)) sessionTurns = rawTurns;\n  else if (typeof rawTurns === 'string') sessionTurns = JSON.parse(rawTurns);\n} catch(e) { sessionTurns = []; }\n\nconst mode = sessionData.mode || null;\nconst text = (msgData.messageText || '').trim();\n\n// Determine intent\nlet intent;\nlet keyword = '';\n\nif (mode === 'waiting_keyword') {\n  // User is typing a keyword for file search\n  intent = 'file_search_execute';\n  keyword = text;\n} else if (text === '找檔案') {\n  // User tapped Quick Reply '找檔案' button\n  intent = 'file_search_menu';\n} else {\n  // Normal QA (includes '問問題' button tap — LLM will handle gracefully)\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: msgData.lineUserId,\n    messageText: msgData.messageText,\n    replyToken: msgData.replyToken,\n    intent: intent,\n    keyword: keyword,\n    sessionTurns: sessionTurns,\n    sessionMode: mode\n  }\n};"
+        "jsCode": "const sessionData = $input.item.json;\nconst msgData = $('Parse Message').first().json;\n\n// Parse turns safely\nlet sessionTurns = [];\ntry {\n  const rawTurns = sessionData.turns;\n  if (Array.isArray(rawTurns)) sessionTurns = rawTurns;\n  else if (typeof rawTurns === 'string') sessionTurns = JSON.parse(rawTurns);\n} catch(e) { sessionTurns = []; }\n\nconst mode = sessionData.mode || null;\nconst text = (msgData.messageText || '').trim();\n\n// File type label → internal key mapping\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\n\nif (mode === 'waiting_filetype') {\n  // User is selecting a file type from Quick Reply\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa'; // not a valid type, fall back to QA\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  // User is typing a search keyword (type already chosen)\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1] || '';\n} else if (text === '\\u627E\\u6A94\\u6848') {\n  // User tapped Rich Menu or Quick Reply '找檔案'\n  intent = 'file_search_menu';\n} else {\n  // Normal QA (includes '問問題')\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: msgData.lineUserId,\n    messageText: msgData.messageText,\n    replyToken: msgData.replyToken,\n    intent: intent,\n    keyword: keyword,\n    fileType: fileType,\n    sessionTurns: sessionTurns,\n    sessionMode: mode\n  }\n};"
       },
       "notes": "Determines intent: 'qa' (RAG), 'file_search_execute' (when mode=waiting_keyword), 'file_search_menu' (when text='找檔案'). Sets keyword for file_search_execute."
     },
@@ -154,10 +154,10 @@
       "position": [2250, 300],
       "parameters": {
         "mode": "expression",
-        "output": "={{ $json.intent === 'file_search_execute' ? 1 : $json.intent === 'file_search_menu' ? 2 : 0 }}",
+        "output": "={{ $json.intent === 'file_search_execute' ? 1 : $json.intent === 'file_search_menu' ? 2 : $json.intent === 'file_type_selected' ? 3 : 0 }}",
         "options": {}
       },
-      "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu"
+      "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu, 3=file_type_selected"
     },
     {
       "id": "qa-node-005",
@@ -377,7 +377,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({keyword: $json.keyword || ''}) }}",
+        "body": "={{ JSON.stringify({keyword: $json.keyword || '', file_type: $json.fileType || ''}) }}",
         "options": {
           "timeout": 15000
         }
@@ -453,35 +453,39 @@
     },
     {
       "id": "qa-node-028",
-      "name": "LINE Reply: Ask Keyword",
+      "name": "LINE Reply: Select File Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2500, 900],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const intentData = $('Intent Router').first().json;\n// Build reply with Quick Reply file type buttons (using unicode to avoid emoji parse issues)\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{\n    type: 'text',\n    text: '\\u8ACB\\u9078\\u64C7\\u67E5\\u8A62\\u6A94\\u6848\\u985E\\u578B\\uFF1A',\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: 'PDF', text: 'PDF' } },\n        { type: 'action', action: { type: 'message', label: 'Word', text: 'Word' } },\n        { type: 'action', action: { type: 'message', label: 'Excel', text: 'Excel' } },\n        { type: 'action', action: { type: 'message', label: 'JPG', text: 'JPG' } }\n      ]\n    }\n  }]\n});\nreturn { json: { replyToken: intentData.replyToken, lineUserId: intentData.lineUserId, replyBody: replyBody } };"
+      },
+      "notes": "File search menu: asks user to pick file type via Quick Reply [PDF][Word][Excel][JPG]"
+    },
+    {
+      "id": "qa-node-028b",
+      "name": "Send: Select File Type",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2500, 900],
+      "position": [2750, 900],
       "parameters": {
         "method": "POST",
         "url": "https://api.line.me/v2/bot/message/reply",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            {
-              "name": "Authorization",
-              "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU="
-            },
-            {
-              "name": "Content-Type",
-              "value": "application/json"
-            }
+            { "name": "Authorization", "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=" },
+            { "name": "Content-Type", "value": "application/json" }
           ]
         },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({replyToken: $json.replyToken, messages: [{type: 'text', text: '請輸入要搜尋的檔案關鍵字：\\n（例如：勞動法、職安、消防）'}]}) }}",
-        "options": {
-          "timeout": 30000
-        }
+        "body": "={{ $json.replyBody }}",
+        "options": { "timeout": 30000 }
       },
-      "notes": "File search menu branch: prompts user to enter keyword. No Quick Reply buttons here — forces text input."
+      "notes": "Sends file type selection Quick Reply to LINE"
     },
     {
       "id": "qa-node-029",
@@ -491,7 +495,7 @@
       "position": [2750, 900],
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, 'waiting_keyword')\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = 'waiting_keyword', updated_at = NOW()",
+        "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, 'waiting_filetype')\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = 'waiting_filetype', updated_at = NOW()",
         "options": {
           "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId]) }}"
         }
@@ -503,7 +507,65 @@
         }
       },
       "continueOnFail": true,
-      "notes": "Sets session mode='waiting_keyword'. Next message from user will be routed to file_search_execute branch."
+      "notes": "Sets session mode='waiting_filetype'. Next message will be handled as file type selection."
+    },
+    {
+      "id": "qa-node-030",
+      "name": "LINE Reply: Ask Keyword",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2500, 1100],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const intentData = $('Intent Router').first().json;\nconst typeLabel = { 'pdf': 'PDF', 'docx': 'Word', 'xlsx': 'Excel', 'jpg': 'JPG' }[intentData.fileType] || intentData.fileType;\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{ type: 'text', text: '\\u8ACB\\u8F38\\u5165\\u8981\\u641C\\u5C0B\\u7684 ' + typeLabel + ' \\u6A94\\u6848\\u95DC\\u9375\\u5B57\\uFF1A' }]\n});\nreturn { json: { lineUserId: intentData.lineUserId, fileType: intentData.fileType, replyBody: replyBody } };"
+      },
+      "notes": "file_type_selected branch: asks user for keyword, mentions chosen file type"
+    },
+    {
+      "id": "qa-node-030b",
+      "name": "Send: Ask Keyword",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2750, 1100],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.replyBody }}",
+        "options": { "timeout": 30000 }
+      },
+      "notes": "Sends keyword prompt to LINE"
+    },
+    {
+      "id": "qa-node-031",
+      "name": "Update Session: Set Keyword Mode",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [3000, 1100],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, $2)\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = $2, updated_at = NOW()",
+        "options": {
+          "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId, 'waiting_keyword:' + $('Intent Router').first().json.fileType]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "d1sS4zldfDUxHn2j",
+          "name": "PostgreSQL vectordb"
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Sets mode='waiting_keyword:pdf' (or docx/xlsx/jpg). Next message will be keyword for file search."
     },
     {
       "id": "qa-node-018",
@@ -581,7 +643,28 @@
       "main": [
         [{ "node": "Execute: vector_search", "type": "main", "index": 0 }],
         [{ "node": "Execute: search_files", "type": "main", "index": 0 }],
+        [{ "node": "LINE Reply: Select File Type", "type": "main", "index": 0 }],
         [{ "node": "LINE Reply: Ask Keyword", "type": "main", "index": 0 }]
+      ]
+    },
+    "LINE Reply: Select File Type": {
+      "main": [
+        [{ "node": "Send: Select File Type", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send: Select File Type": {
+      "main": [
+        [{ "node": "Update Session: Set Mode", "type": "main", "index": 0 }]
+      ]
+    },
+    "LINE Reply: Ask Keyword": {
+      "main": [
+        [{ "node": "Send: Ask Keyword", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send: Ask Keyword": {
+      "main": [
+        [{ "node": "Update Session: Set Keyword Mode", "type": "main", "index": 0 }]
       ]
     },
     "Execute: vector_search": {
@@ -647,11 +730,6 @@
     "LINE Reply: File Links": {
       "main": [
         [{ "node": "Update Session: Clear Mode", "type": "main", "index": 0 }]
-      ]
-    },
-    "LINE Reply: Ask Keyword": {
-      "main": [
-        [{ "node": "Update Session: Set Mode", "type": "main", "index": 0 }]
       ]
     },
     "Error Trigger": {
