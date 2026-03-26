@@ -282,22 +282,25 @@ class APIHandler(BaseHTTPRequestHandler):
             )
             try:
                 with conn.cursor() as cur:
+                    # Strip spaces from both keyword and file_name before matching
+                    kw_nospace = f"%{keyword.replace(' ', '')}%"
                     if ext_list:
-                        # Build OR conditions for each extension
                         ext_clauses = " OR ".join(
                             [f"LOWER(file_name) LIKE %s" for _ in ext_list]
                         )
                         sql = (
                             f"SELECT file_name, file_path FROM documents "
-                            f"WHERE file_name ILIKE %s AND ({ext_clauses}) "
+                            f"WHERE replace(file_name, ' ', '') ILIKE %s AND ({ext_clauses}) "
                             f"ORDER BY file_name LIMIT 50"
                         )
-                        params = [f"%{keyword}%"] + [f"%{ext}" for ext in ext_list]
+                        params = [kw_nospace] + [f"%{ext}" for ext in ext_list]
                         cur.execute(sql, params)
                     else:
                         cur.execute(
-                            "SELECT file_name, file_path FROM documents WHERE file_name ILIKE %s ORDER BY file_name LIMIT 50",
-                            (f"%{keyword}%",),
+                            "SELECT file_name, file_path FROM documents "
+                            "WHERE replace(file_name, ' ', '') ILIKE %s "
+                            "ORDER BY file_name LIMIT 50",
+                            (kw_nospace,),
                         )
                     rows = cur.fetchall()
             finally:

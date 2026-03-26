@@ -30,7 +30,10 @@
       "name": "LINE Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [250, 300],
+      "position": [
+        250,
+        300
+      ],
       "parameters": {
         "httpMethod": "POST",
         "path": "line-qa",
@@ -47,7 +50,10 @@
       "name": "Execute: line_verify",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [500, 300],
+      "position": [
+        500,
+        300
+      ],
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:8765/line-verify",
@@ -67,7 +73,10 @@
       "name": "Parse Verify",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [750, 300],
+      "position": [
+        750,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const result = $input.item.json;\nif (!result || !result.valid) {\n  return null;\n}\nreturn { json: $('LINE Webhook').first().json };"
@@ -79,7 +88,10 @@
       "name": "Parse Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1000, 300],
+      "position": [
+        1000,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const data = $input.item.json;\nconst body = data.body || {};\nconst events = body.events || [];\nif (events.length === 0) return null;\nconst event = events[0];\nif (event.type !== 'message' || !event.message || event.message.type !== 'text') return null;\nreturn {\n  json: {\n    lineUserId: event.source && event.source.userId || '',\n    messageText: event.message.text || '',\n    replyToken: event.replyToken || ''\n  }\n};"
@@ -91,7 +103,10 @@
       "name": "Query Session Early",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1250, 300],
+      "position": [
+        1250,
+        300
+      ],
       "parameters": {
         "operation": "executeQuery",
         "query": "={{ `SELECT COALESCE(turns, '[]'::jsonb) AS turns, mode FROM conversation_sessions WHERE line_user_id = '${$json.lineUserId}' UNION ALL SELECT '[]'::jsonb, NULL WHERE NOT EXISTS (SELECT 1 FROM conversation_sessions WHERE line_user_id = '${$json.lineUserId}') LIMIT 1` }}"
@@ -109,7 +124,10 @@
       "name": "Intent Router",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1500, 300],
+      "position": [
+        1500,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const sessionData = $input.item.json;\nconst msgData = $('Parse Message').first().json;\n\n// Parse turns safely\nlet sessionTurns = [];\ntry {\n  const rawTurns = sessionData.turns;\n  if (Array.isArray(rawTurns)) sessionTurns = rawTurns;\n  else if (typeof rawTurns === 'string') sessionTurns = JSON.parse(rawTurns);\n} catch(e) { sessionTurns = []; }\n\nconst mode = sessionData.mode || null;\nconst text = (msgData.messageText || '').trim();\n\n// File type label → internal key mapping\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\n\nif (mode === 'waiting_filetype') {\n  // User is selecting a file type from Quick Reply\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa'; // not a valid type, fall back to QA\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  // User is typing a search keyword (type already chosen)\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1] || '';\n} else if (text === '\\u627E\\u6A94\\u6848') {\n  // User tapped Rich Menu or Quick Reply '找檔案'\n  intent = 'file_search_menu';\n} else {\n  // Normal QA (includes '問問題')\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: msgData.lineUserId,\n    messageText: msgData.messageText,\n    replyToken: msgData.replyToken,\n    intent: intent,\n    keyword: keyword,\n    fileType: fileType,\n    sessionTurns: sessionTurns,\n    sessionMode: mode\n  }\n};"
@@ -121,7 +139,10 @@
       "name": "Query allowed_users",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [1750, 300],
+      "position": [
+        1750,
+        300
+      ],
       "parameters": {
         "operation": "executeQuery",
         "query": "={{ `SELECT EXISTS(SELECT 1 FROM allowed_users WHERE line_user_id = '${$json.lineUserId}') AS authorized` }}"
@@ -139,7 +160,10 @@
       "name": "Check Auth",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2000, 300],
+      "position": [
+        2000,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const authResult = $input.item.json;\nconst intentData = $('Intent Router').first().json;\n\nif (!authResult.authorized) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.line.me/v2/bot/message/reply',\n      headers: {\n        'Authorization': 'Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=',\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({\n        replyToken: intentData.replyToken,\n        messages: [{ type: 'text', text: '您無使用權限' }]\n      })\n    });\n  } catch(e) {}\n  return null;\n}\n\n// Authorized — pass intent data through\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    messageText: intentData.messageText,\n    replyToken: intentData.replyToken,\n    intent: intentData.intent,\n    keyword: intentData.keyword,\n    sessionTurns: intentData.sessionTurns\n  }\n};"
@@ -151,7 +175,10 @@
       "name": "Intent Switch",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3,
-      "position": [2250, 300],
+      "position": [
+        2250,
+        300
+      ],
       "parameters": {
         "mode": "expression",
         "output": "={{ $json.intent === 'file_search_execute' ? 1 : $json.intent === 'file_search_menu' ? 2 : $json.intent === 'file_type_selected' ? 3 : 0 }}",
@@ -164,7 +191,10 @@
       "name": "Execute: vector_search",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2500, 300],
+      "position": [
+        2500,
+        300
+      ],
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:8765/vector-search",
@@ -185,7 +215,10 @@
       "name": "Parse Chunks",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2750, 300],
+      "position": [
+        2750,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const resp = $input.item.json;\nlet chunks = (resp && Array.isArray(resp.chunks)) ? resp.chunks : (Array.isArray(resp) ? resp : []);\nconst msgData = $('Parse Message').first().json;\nreturn {\n  json: {\n    lineUserId: msgData.lineUserId,\n    messageText: msgData.messageText,\n    replyToken: msgData.replyToken,\n    chunks: chunks,\n    chunkIds: chunks.map(function(c) { return c.chunk_id; })\n  }\n};"
@@ -197,7 +230,10 @@
       "name": "Combine QA Data",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [3000, 300],
+      "position": [
+        3000,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const chunksData = $input.item.json;\n// Get session turns from the early session query (via Intent Router)\nconst intentData = $('Intent Router').first().json;\nconst turns = Array.isArray(intentData.sessionTurns) ? intentData.sessionTurns : [];\nconst history = turns.slice(-6); // last 3 rounds\n\nreturn {\n  json: {\n    lineUserId: chunksData.lineUserId,\n    messageText: chunksData.messageText,\n    replyToken: chunksData.replyToken,\n    chunks: chunksData.chunks,\n    chunkIds: chunksData.chunkIds,\n    history: history,\n    sessionTurns: turns\n  }\n};"
@@ -209,7 +245,10 @@
       "name": "Execute: prompt_builder",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3250, 300],
+      "position": [
+        3250,
+        300
+      ],
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:8765/prompt-builder",
@@ -229,7 +268,10 @@
       "name": "Parse Prompt",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [3500, 300],
+      "position": [
+        3500,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const promptData = $input.item.json;\nif (!promptData || promptData.error) {\n  throw new Error('prompt_builder API failed: ' + (promptData && promptData.error || 'Unknown error'));\n}\nconst prevData = $('Combine QA Data').first().json;\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    systemPrompt: promptData.system || '',\n    userPrompt: promptData.prompt || ''\n  }\n};"
@@ -241,7 +283,10 @@
       "name": "Ollama Chat",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3750, 300],
+      "position": [
+        3750,
+        300
+      ],
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:11434/api/chat",
@@ -269,7 +314,10 @@
       "name": "Extract Answer",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [4000, 300],
+      "position": [
+        4000,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const response = $input.item.json;\nconst answer = (response.message && response.message.content) || response.response || '抱歉，目前無法生成回答，請稍後再試。';\nconst prevData = $('Parse Prompt').first().json;\n\n// Build LINE reply body here (not in HTTP Request) to avoid emoji in n8n expression parser\nconst replyBody = JSON.stringify({\n  replyToken: prevData.replyToken,\n  messages: [{\n    type: 'text',\n    text: answer,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u627E\\u6A94\\u6848', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    answer: answer,\n    replyBody: replyBody\n  }\n};"
@@ -281,7 +329,10 @@
       "name": "LINE Reply",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [4250, 300],
+      "position": [
+        4250,
+        300
+      ],
       "parameters": {
         "method": "POST",
         "url": "https://api.line.me/v2/bot/message/reply",
@@ -313,7 +364,10 @@
       "name": "Post-Reply Processing",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [4500, 300],
+      "position": [
+        4500,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const extractData = $('Extract Answer').first().json;\nconst oldTurns = Array.isArray(extractData.sessionTurns) ? extractData.sessionTurns : [];\nconst newTurns = oldTurns.concat([\n  { role: 'user', content: extractData.messageText },\n  { role: 'assistant', content: extractData.answer }\n]).slice(-10);\n\nconst chunkIds = Array.isArray(extractData.chunkIds) ? extractData.chunkIds : [];\nconst chunkIdsArray = chunkIds.length > 0 ? '{' + chunkIds.join(',') + '}' : '{}';\n\nreturn {\n  json: {\n    lineUserId: extractData.lineUserId,\n    messageText: extractData.messageText,\n    answer: extractData.answer,\n    newTurnsJson: JSON.stringify(newTurns),\n    chunkIdsArray: chunkIdsArray\n  }\n};"
@@ -325,7 +379,10 @@
       "name": "Update conversation_sessions",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [4750, 300],
+      "position": [
+        4750,
+        300
+      ],
       "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, $2::jsonb, NULL)\nON CONFLICT (line_user_id)\nDO UPDATE SET turns = EXCLUDED.turns, mode = NULL, updated_at = NOW()",
@@ -347,7 +404,10 @@
       "name": "Insert qa_logs",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [5000, 300],
+      "position": [
+        5000,
+        300
+      ],
       "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO qa_logs (user_id, question, retrieved_chunk_ids, answer)\nVALUES ($1, $2, $3::uuid[], $4)",
@@ -369,7 +429,10 @@
       "name": "Execute: search_files",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2500, 600],
+      "position": [
+        2500,
+        600
+      ],
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:8765/search-files",
@@ -390,7 +453,10 @@
       "name": "Build File Links Reply",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2750, 600],
+      "position": [
+        2750,
+        600
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "// TODO: Update PUBLIC_API_BASE_URL to your Named Tunnel URL once configured\nconst PUBLIC_API_BASE_URL = 'https://peninsula-logo-seriously-chronic.trycloudflare.com'; // Cloudflare Quick Tunnel\n\nconst resp = $input.item.json;\nconst intentData = $('Intent Router').first().json;\nconst results = (resp && Array.isArray(resp.results)) ? resp.results : [];\nconst keyword = intentData.keyword || '';\n\nlet replyText;\nif (results.length === 0) {\n  replyText = '\\u627E\\u4E0D\\u5230\\u5305\\u542B\\u300C' + keyword + '\\u300D\\u7684\\u6A94\\u6848\\u3002\\n\\n\\u8ACB\\u5617\\u8A66\\u5176\\u4ED6\\u95DC\\u9375\\u5B57\\uFF0C\\u6216\\u8F38\\u5165\\u300C\\u627E\\u6A94\\u6848\\u300D\\u91CD\\u8A66\\u3002';\n} else {\n  const lines = ['\\u627E\\u5230 ' + results.length + ' \\u500B\\u76F8\\u95DC\\u6A94\\u6848\\uFF1A\\n'];\n  results.slice(0, 10).forEach(function(r, i) {\n    const url = PUBLIC_API_BASE_URL + r.download_url;\n    lines.push((i + 1) + '. ' + r.file_name);\n    lines.push('   \\u4E0B\\u8F09\\uFF1A' + url);\n  });\n  if (results.length > 10) {\n    lines.push('\\n\\uFF08\\u5171 ' + results.length + ' \\u7B46\\uFF0C\\u986F\\u793A\\u524D 10 \\u7B46\\uFF09');\n  }\n  replyText = lines.join('\\n');\n}\n\n// Build reply body with quickReply using unicode escapes (avoid emoji in expression engine)\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{\n    type: 'text',\n    text: replyText,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u518D\\u627E\\u4E00\\u6B21', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    replyToken: intentData.replyToken,\n    replyText: replyText,\n    replyBody: replyBody\n  }\n};"
@@ -402,7 +468,10 @@
       "name": "LINE Reply: File Links",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [3000, 600],
+      "position": [
+        3000,
+        600
+      ],
       "parameters": {
         "method": "POST",
         "url": "https://api.line.me/v2/bot/message/reply",
@@ -434,7 +503,10 @@
       "name": "Update Session: Clear Mode",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3250, 600],
+      "position": [
+        3250,
+        600
+      ],
       "parameters": {
         "operation": "executeQuery",
         "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$('Intent Router').first().json.lineUserId}', '[]'::jsonb, NULL) ON CONFLICT (line_user_id) DO UPDATE SET mode = NULL, updated_at = NOW()` }}",
@@ -454,7 +526,10 @@
       "name": "LINE Reply: Select File Type",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2500, 900],
+      "position": [
+        2500,
+        900
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const intentData = $('Intent Router').first().json;\n// Build reply with Quick Reply file type buttons (using unicode to avoid emoji parse issues)\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{\n    type: 'text',\n    text: '\\u8ACB\\u9078\\u64C7\\u67E5\\u8A62\\u6A94\\u6848\\u985E\\u578B\\uFF1A',\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: 'PDF', text: 'PDF' } },\n        { type: 'action', action: { type: 'message', label: 'Word', text: 'Word' } },\n        { type: 'action', action: { type: 'message', label: 'Excel', text: 'Excel' } },\n        { type: 'action', action: { type: 'message', label: 'JPG', text: 'JPG' } }\n      ]\n    }\n  }]\n});\nreturn { json: { replyToken: intentData.replyToken, lineUserId: intentData.lineUserId, replyBody: replyBody } };"
@@ -466,34 +541,63 @@
       "name": "Send: Select File Type",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2750, 900],
+      "position": [
+        2750,
+        900
+      ],
       "parameters": {
         "method": "POST",
         "url": "https://api.line.me/v2/bot/message/reply",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=" },
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Authorization",
+              "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ $json.replyBody }}",
-        "options": { "timeout": 30000 }
+        "options": {
+          "timeout": 30000
+        }
       },
       "notes": "Sends file type selection Quick Reply to LINE"
+    },
+    {
+      "id": "qa-node-029-prep",
+      "name": "Prep: Set Mode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2750,
+        900
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return { json: { lineUserId: $('Intent Router').first().json.lineUserId } };"
+      },
+      "notes": "Extracts lineUserId from Intent Router so Postgres node can use $json.lineUserId directly"
     },
     {
       "id": "qa-node-029",
       "name": "Update Session: Set Mode",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [2750, 900],
+      "position": [
+        3000,
+        900
+      ],
       "parameters": {
         "operation": "executeQuery",
-        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$('Intent Router').first().json.lineUserId}', '[]'::jsonb, 'waiting_filetype') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'waiting_filetype', updated_at = NOW()` }}",
+        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$json.lineUserId}', '[]'::jsonb, 'waiting_filetype') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'waiting_filetype', updated_at = NOW()` }}",
         "options": {}
       },
       "credentials": {
@@ -510,7 +614,10 @@
       "name": "LINE Reply: Ask Keyword",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2500, 1100],
+      "position": [
+        2500,
+        1100
+      ],
       "parameters": {
         "mode": "runOnceForEachItem",
         "jsCode": "const intentData = $('Intent Router').first().json;\nconst typeLabel = { 'pdf': 'PDF', 'docx': 'Word', 'xlsx': 'Excel', 'jpg': 'JPG' }[intentData.fileType] || intentData.fileType;\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{ type: 'text', text: '\\u8ACB\\u8F38\\u5165\\u8981\\u641C\\u5C0B\\u7684 ' + typeLabel + ' \\u6A94\\u6848\\u95DC\\u9375\\u5B57\\uFF1A' }]\n});\nreturn { json: { lineUserId: intentData.lineUserId, fileType: intentData.fileType, replyBody: replyBody } };"
@@ -522,34 +629,63 @@
       "name": "Send: Ask Keyword",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2750, 1100],
+      "position": [
+        2750,
+        1100
+      ],
       "parameters": {
         "method": "POST",
         "url": "https://api.line.me/v2/bot/message/reply",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Authorization", "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=" },
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Authorization",
+              "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
         "body": "={{ $json.replyBody }}",
-        "options": { "timeout": 30000 }
+        "options": {
+          "timeout": 30000
+        }
       },
       "notes": "Sends keyword prompt to LINE"
+    },
+    {
+      "id": "qa-node-031-prep",
+      "name": "Prep: Set Keyword Mode",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        1100
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ir = $('Intent Router').first().json;\nreturn { json: { lineUserId: ir.lineUserId, fileType: ir.fileType } };"
+      },
+      "notes": "Extracts lineUserId + fileType from Intent Router for Postgres node"
     },
     {
       "id": "qa-node-031",
       "name": "Update Session: Set Keyword Mode",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [3000, 1100],
+      "position": [
+        3250,
+        1100
+      ],
       "parameters": {
         "operation": "executeQuery",
-        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$('Intent Router').first().json.lineUserId}', '[]'::jsonb, 'waiting_keyword:${$('Intent Router').first().json.fileType}') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'waiting_keyword:${$('Intent Router').first().json.fileType}', updated_at = NOW()` }}",
+        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$json.lineUserId}', '[]'::jsonb, 'waiting_keyword:${$json.fileType}') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'waiting_keyword:${$json.fileType}', updated_at = NOW()` }}",
         "options": {}
       },
       "credentials": {
@@ -566,7 +702,10 @@
       "name": "Error Trigger",
       "type": "n8n-nodes-base.errorTrigger",
       "typeVersion": 1,
-      "position": [250, 1200],
+      "position": [
+        250,
+        1200
+      ],
       "parameters": {},
       "notes": "Fires when any node throws an unhandled error."
     },
@@ -575,7 +714,10 @@
       "name": "Log Error",
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.5,
-      "position": [500, 1200],
+      "position": [
+        500,
+        1200
+      ],
       "parameters": {
         "operation": "executeQuery",
         "query": "INSERT INTO processing_logs (file_name, step_name, log_level, message, details)\nVALUES ('LINE QA', $1, 'error', $2, $3::jsonb)",
@@ -595,140 +737,342 @@
   "connections": {
     "LINE Webhook": {
       "main": [
-        [{ "node": "Execute: line_verify", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Execute: line_verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Execute: line_verify": {
       "main": [
-        [{ "node": "Parse Verify", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Parse Verify",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Parse Verify": {
       "main": [
-        [{ "node": "Parse Message", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Parse Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Parse Message": {
       "main": [
-        [{ "node": "Query Session Early", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Query Session Early",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Query Session Early": {
       "main": [
-        [{ "node": "Intent Router", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Intent Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Intent Router": {
       "main": [
-        [{ "node": "Query allowed_users", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Query allowed_users",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Query allowed_users": {
       "main": [
-        [{ "node": "Check Auth", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Check Auth",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Check Auth": {
       "main": [
-        [{ "node": "Intent Switch", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Intent Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Intent Switch": {
       "main": [
-        [{ "node": "Execute: vector_search", "type": "main", "index": 0 }],
-        [{ "node": "Execute: search_files", "type": "main", "index": 0 }],
-        [{ "node": "LINE Reply: Select File Type", "type": "main", "index": 0 }],
-        [{ "node": "LINE Reply: Ask Keyword", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Execute: vector_search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute: search_files",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LINE Reply: Select File Type",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LINE Reply: Ask Keyword",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "LINE Reply: Select File Type": {
       "main": [
-        [{ "node": "Send: Select File Type", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Send: Select File Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Send: Select File Type": {
       "main": [
-        [{ "node": "Update Session: Set Mode", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Prep: Set Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "LINE Reply: Ask Keyword": {
       "main": [
-        [{ "node": "Send: Ask Keyword", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Send: Ask Keyword",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Send: Ask Keyword": {
       "main": [
-        [{ "node": "Update Session: Set Keyword Mode", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Prep: Set Keyword Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Execute: vector_search": {
       "main": [
-        [{ "node": "Parse Chunks", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Parse Chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Parse Chunks": {
       "main": [
-        [{ "node": "Combine QA Data", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Combine QA Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Combine QA Data": {
       "main": [
-        [{ "node": "Execute: prompt_builder", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Execute: prompt_builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Execute: prompt_builder": {
       "main": [
-        [{ "node": "Parse Prompt", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Parse Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Parse Prompt": {
       "main": [
-        [{ "node": "Ollama Chat", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Ollama Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Ollama Chat": {
       "main": [
-        [{ "node": "Extract Answer", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Extract Answer",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Extract Answer": {
       "main": [
-        [{ "node": "LINE Reply", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "LINE Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "LINE Reply": {
       "main": [
-        [{ "node": "Post-Reply Processing", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Post-Reply Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Post-Reply Processing": {
       "main": [
-        [{ "node": "Update conversation_sessions", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Update conversation_sessions",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Update conversation_sessions": {
       "main": [
-        [{ "node": "Insert qa_logs", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Insert qa_logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Execute: search_files": {
       "main": [
-        [{ "node": "Build File Links Reply", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Build File Links Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Build File Links Reply": {
       "main": [
-        [{ "node": "LINE Reply: File Links", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "LINE Reply: File Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "LINE Reply: File Links": {
       "main": [
-        [{ "node": "Update Session: Clear Mode", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Update Session: Clear Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Error Trigger": {
       "main": [
-        [{ "node": "Log Error", "type": "main", "index": 0 }]
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep: Set Mode": {
+      "main": [
+        [
+          {
+            "node": "Update Session: Set Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep: Set Keyword Mode": {
+      "main": [
+        [
+          {
+            "node": "Update Session: Set Keyword Mode",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
