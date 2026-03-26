@@ -24,11 +24,34 @@ import os
 import argparse
 import subprocess
 import traceback
+import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parent
+
+
+def _load_dotenv(path: str) -> None:
+    """Minimal .env loader — sets os.environ for keys not already set."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv(str(_PROJECT_ROOT / "config" / ".env"))
+
+FILES_BASE_DIR = os.environ.get("FILES_BASE_DIR", "D:/職安")
 
 
 class APIHandler(BaseHTTPRequestHandler):
@@ -73,6 +96,9 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.send_json(200, {"status": "ok"})
+        elif self.path.startswith("/files/"):
+            filename = self.path[7:]  # strip "/files/"
+            self._handle_file_download(filename)
         else:
             self.send_json(404, {"error": "Not found"})
 
@@ -90,6 +116,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._handle_vector_search(data)
             elif self.path == "/prompt-builder":
                 self._handle_prompt_builder(data)
+            elif self.path == "/search-files":
+                self._handle_search_files(data)
             else:
                 self.send_json(404, {"error": "Not found"})
         except Exception as e:
@@ -157,6 +185,114 @@ class APIHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_json(200, {"chunks": [], "count": 0})
 
+    def _handle_file_download(self, filename: str):
+        """GET /files/<filename> — lookup file_path from DB, serve with path-traversal protection."""
+        # URL-decode first
+        try:
+            filename = urllib.parse.unquote(filename, encoding="utf-8")
+        except Exception:
+            self.send_json(400, {"error": "Invalid URL encoding"})
+            return
+
+        # Block traversal sequences (after decode)
+        if not filename or ".." in filename or "\x00" in filename:
+            self.send_json(400, {"error": "Invalid filename"})
+            return
+
+        # Lookup actual file_path from DB
+        target = None
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=os.environ.get("POSTGRES_HOST", "localhost"),
+                port=int(os.environ.get("POSTGRES_PORT", "65432")),
+                dbname=os.environ.get("POSTGRES_DB", "vectordb"),
+                user=os.environ.get("POSTGRES_USER", "testuser"),
+                password=os.environ.get("POSTGRES_PASSWORD", "testpwd"),
+            )
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT file_path FROM documents WHERE file_name = %s AND file_path IS NOT NULL LIMIT 1",
+                        (filename,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        target = row[0]
+            finally:
+                conn.close()
+        except Exception as e:
+            sys.stderr.write(f"[api_server] DB lookup error: {e}\n")
+
+        # Fallback to FILES_BASE_DIR if not in DB
+        if not target:
+            base_dir = os.path.abspath(FILES_BASE_DIR)
+            candidate = os.path.abspath(os.path.join(base_dir, os.path.basename(filename)))
+            if candidate.startswith(base_dir + os.sep) and os.path.isfile(candidate):
+                target = candidate
+
+        if not target or not os.path.isfile(target):
+            self.send_json(404, {"error": f"File not found: {filename}"})
+            return
+
+        try:
+            with open(target, "rb") as f:
+                content = f.read()
+            encoded_name = urllib.parse.quote(os.path.basename(target), safe="")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.send_json(500, {"error": str(e)})
+
+    def _handle_search_files(self, data: dict):
+        """POST /search-files  {keyword} -> {results: [{file_name, file_path, download_url}], count}"""
+        keyword = data.get("keyword", "")
+        if not keyword:
+            self.send_json(400, {"error": "Missing required field: keyword"})
+            return
+
+        try:
+            import psycopg2  # type: ignore
+        except ImportError:
+            self.send_json(500, {"error": "psycopg2 not installed"})
+            return
+
+        try:
+            conn = psycopg2.connect(
+                host=os.environ.get("POSTGRES_HOST", "localhost"),
+                port=int(os.environ.get("POSTGRES_PORT", "65432")),
+                dbname=os.environ.get("POSTGRES_DB", "vectordb"),
+                user=os.environ.get("POSTGRES_USER", "testuser"),
+                password=os.environ.get("POSTGRES_PASSWORD", "testpwd"),
+            )
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT file_name, file_path FROM documents WHERE file_name ILIKE %s ORDER BY file_name LIMIT 50",
+                        (f"%{keyword}%",),
+                    )
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+
+            results = [
+                {
+                    "file_name": row[0],
+                    "file_path": row[1],
+                    "download_url": f"/files/{urllib.parse.quote(row[0], safe='')}",
+                }
+                for row in rows
+            ]
+            self.send_json(200, {"results": results, "count": len(results)})
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.send_json(500, {"error": str(e)})
+
     def _handle_prompt_builder(self, data: dict):
         """POST /prompt-builder  {question, chunks, history} -> {system, prompt}"""
         question = data.get("question", "")
@@ -198,7 +334,7 @@ def main():
 
     server = HTTPServer((args.host, args.port), APIHandler)
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health  POST /line-verify  /vector-search  /prompt-builder\n")
+    sys.stderr.write(f"[api_server] Endpoints: GET /health /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files\n")
     sys.stderr.flush()
     try:
         server.serve_forever()

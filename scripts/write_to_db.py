@@ -98,9 +98,9 @@ def insert_document(conn, metadata: dict, ocr_used: bool, page_count: int) -> st
         cur.execute(
             """
             INSERT INTO documents
-                (file_name, file_ext, file_path, file_size, hash_sha256,
+                (file_name, file_ext, file_path, file_size, file_size_bytes, hash_sha256,
                  storage_type, ingest_status, parse_status, department, confidential_level)
-            VALUES (%s, %s, %s, %s, %s, 'filesystem', 'processing', 'pending', %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, 'filesystem', 'processing', 'pending', %s, %s)
             RETURNING id
             """,
             (
@@ -108,6 +108,7 @@ def insert_document(conn, metadata: dict, ocr_used: bool, page_count: int) -> st
                 metadata.get("file_ext", ""),
                 metadata.get("file_path", ""),
                 metadata.get("file_size"),
+                metadata.get("file_size_bytes", metadata.get("file_size")),
                 metadata["hash_sha256"],
                 metadata.get("department", os.environ.get("DEFAULT_DEPARTMENT", "general")),
                 metadata.get("confidential_level", "internal"),
