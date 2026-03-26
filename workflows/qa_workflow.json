@@ -437,10 +437,8 @@
       "position": [3250, 600],
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, NULL)\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = NULL, updated_at = NOW()",
-        "options": {
-          "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId]) }}"
-        }
+        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$('Intent Router').first().json.lineUserId}', '[]'::jsonb, NULL) ON CONFLICT (line_user_id) DO UPDATE SET mode = NULL, updated_at = NOW()` }}",
+        "options": {}
       },
       "credentials": {
         "postgres": {
@@ -495,10 +493,8 @@
       "position": [2750, 900],
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, 'waiting_filetype')\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = 'waiting_filetype', updated_at = NOW()",
-        "options": {
-          "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId]) }}"
-        }
+        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$('Intent Router').first().json.lineUserId}', '[]'::jsonb, 'waiting_filetype') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'waiting_filetype', updated_at = NOW()` }}",
+        "options": {}
       },
       "credentials": {
         "postgres": {
@@ -507,7 +503,7 @@
         }
       },
       "continueOnFail": true,
-      "notes": "Sets session mode='waiting_filetype'. Next message will be handled as file type selection."
+      "notes": "Sets session mode='waiting_filetype'. Uses inline expression to embed lineUserId directly in SQL."
     },
     {
       "id": "qa-node-030",
@@ -553,10 +549,8 @@
       "position": [3000, 1100],
       "parameters": {
         "operation": "executeQuery",
-        "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, $2)\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = $2, updated_at = NOW()",
-        "options": {
-          "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId, 'waiting_keyword:' + $('Intent Router').first().json.fileType]) }}"
-        }
+        "query": "={{ `INSERT INTO conversation_sessions (line_user_id, turns, mode) VALUES ('${$('Intent Router').first().json.lineUserId}', '[]'::jsonb, 'waiting_keyword:${$('Intent Router').first().json.fileType}') ON CONFLICT (line_user_id) DO UPDATE SET mode = 'waiting_keyword:${$('Intent Router').first().json.fileType}', updated_at = NOW()` }}",
+        "options": {}
       },
       "credentials": {
         "postgres": {
