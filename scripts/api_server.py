@@ -240,6 +240,14 @@ class APIHandler(BaseHTTPRequestHandler):
             if candidate.startswith(base_dir + os.sep) and os.path.isfile(candidate):
                 target = candidate
 
+        # If DB path no longer exists, search processed/ folder (file moved after ingest)
+        if target and not os.path.isfile(target):
+            inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
+            if inbox_dir:
+                processed_candidate = os.path.join(inbox_dir, "processed", os.path.basename(target))
+                if os.path.isfile(processed_candidate):
+                    target = processed_candidate
+
         if not target or not os.path.isfile(target):
             self.send_json(404, {"error": f"File not found: {filename}"})
             return
