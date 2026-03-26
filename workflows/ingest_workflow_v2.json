@@ -1,0 +1,283 @@
+{
+  "name": "Enterprise Doc Ingest v2",
+  "nodes": [
+    {
+      "id": "ingest-node-001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "notes": "每 1 小時掃描一次收件匣。"
+    },
+    {
+      "id": "ingest-node-001b",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 480],
+      "parameters": {},
+      "notes": "手動測試用：點 Execute Workflow 立即執行"
+    },
+    {
+      "id": "ingest-node-002",
+      "name": "GET: List Inbox Files",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "http://host.docker.internal:8765/list-inbox",
+        "sendHeaders": false,
+        "sendBody": false,
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "notes": "呼叫 api_server GET /list-inbox\n回傳 {files:[{file_name,file_path,file_ext,file_size}], count:N}\n需設定環境變數 INGEST_INBOX_DIR"
+    },
+    {
+      "id": "ingest-node-003",
+      "name": "IF: Has Files",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-count",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "count > 0 → 繼續處理\ncount = 0 → 結束（無待處理檔案）"
+    },
+    {
+      "id": "ingest-node-004",
+      "name": "Split: One File Per Item",
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [940, 220],
+      "parameters": {
+        "fieldToSplitOut": "files",
+        "options": {}
+      },
+      "notes": "將 files 陣列拆分，每個檔案單獨處理"
+    },
+    {
+      "id": "ingest-node-005",
+      "name": "POST: Ingest File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1180, 220],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/ingest-file",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({file_path: $json.file_path, department: $json.department || $json.file_path.split('/').slice(-2,-1)[0] || 'general'}) }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "notes": "呼叫 api_server POST /ingest-file\n完整 pipeline：抽文字 → 切片 → Embedding → 寫入 DB → 移檔\ntimeout 設 300 秒（大檔案 embedding 需要時間）\n回傳 {success, file_name, chunk_count, error?}"
+    },
+    {
+      "id": "ingest-node-006",
+      "name": "IF: Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1420, 220],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "notes": "success=true → 成功分支\nsuccess=false → 失敗分支（檔案已被移至 error 資料夾）"
+    },
+    {
+      "id": "ingest-node-007",
+      "name": "Set: Log Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1660, 120],
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "log-status",
+              "name": "status",
+              "value": "success",
+              "type": "string"
+            },
+            {
+              "id": "log-file",
+              "name": "file_name",
+              "value": "={{ $json.file_name }}",
+              "type": "string"
+            },
+            {
+              "id": "log-chunks",
+              "name": "chunk_count",
+              "value": "={{ $json.chunk_count }}",
+              "type": "number"
+            },
+            {
+              "id": "log-message",
+              "name": "message",
+              "value": "={{ '✅ ' + $json.file_name + ' 匯入成功，共 ' + $json.chunk_count + ' 個切片' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "記錄成功資訊：檔名、切片數量"
+    },
+    {
+      "id": "ingest-node-008",
+      "name": "Set: Log Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1660, 340],
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "log-status",
+              "name": "status",
+              "value": "error",
+              "type": "string"
+            },
+            {
+              "id": "log-file",
+              "name": "file_name",
+              "value": "={{ $json.file_name }}",
+              "type": "string"
+            },
+            {
+              "id": "log-err",
+              "name": "error",
+              "value": "={{ $json.error }}",
+              "type": "string"
+            },
+            {
+              "id": "log-message",
+              "name": "message",
+              "value": "={{ '❌ ' + $json.file_name + ' 匯入失敗：' + ($json.error || '未知錯誤') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "記錄錯誤資訊。失敗檔案已被 api_server 移至 INGEST_ERROR_DIR"
+    },
+    {
+      "id": "ingest-node-009",
+      "name": "No Files to Process",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [940, 420],
+      "parameters": {},
+      "notes": "收件匣為空，本次無需處理"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [{"node": "GET: List Inbox Files", "type": "main", "index": 0}]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [{"node": "GET: List Inbox Files", "type": "main", "index": 0}]
+      ]
+    },
+    "GET: List Inbox Files": {
+      "main": [
+        [{"node": "IF: Has Files", "type": "main", "index": 0}]
+      ]
+    },
+    "IF: Has Files": {
+      "main": [
+        [{"node": "Split: One File Per Item", "type": "main", "index": 0}],
+        [{"node": "No Files to Process", "type": "main", "index": 0}]
+      ]
+    },
+    "Split: One File Per Item": {
+      "main": [
+        [{"node": "POST: Ingest File", "type": "main", "index": 0}]
+      ]
+    },
+    "POST: Ingest File": {
+      "main": [
+        [{"node": "IF: Success?", "type": "main", "index": 0}]
+      ]
+    },
+    "IF: Success?": {
+      "main": [
+        [{"node": "Set: Log Success", "type": "main", "index": 0}],
+        [{"node": "Set: Log Error", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2026-03-26T00:00:00.000Z",
+  "versionId": "ingest-v2-001"
+}

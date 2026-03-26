@@ -96,6 +96,8 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self.send_json(200, {"status": "ok"})
+        elif self.path == "/list-inbox":
+            self._handle_list_inbox()
         elif self.path.startswith("/files/"):
             filename = self.path[7:]  # strip "/files/"
             self._handle_file_download(filename)
@@ -118,6 +120,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._handle_prompt_builder(data)
             elif self.path == "/search-files":
                 self._handle_search_files(data)
+            elif self.path == "/ingest-file":
+                self._handle_ingest_file(data)
+            elif self.path == "/backup-db":
+                self._handle_backup_db(data)
             else:
                 self.send_json(404, {"error": "Not found"})
         except Exception as e:
@@ -322,6 +328,157 @@ class APIHandler(BaseHTTPRequestHandler):
             traceback.print_exc(file=sys.stderr)
             self.send_json(500, {"error": str(e)})
 
+    def _handle_list_inbox(self):
+        """GET /list-inbox — scan INGEST_INBOX_DIR (including subfolders as department).
+
+        Folder structure:
+            inbox/                    → department = 'general'
+            inbox/安全規範/           → department = '安全規範'
+            inbox/工安報告/2026/      → department = '工安報告'  (first-level subfolder name)
+        Skips: processed/, error/, and hidden folders (starting with .)
+        """
+        inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
+        if not inbox_dir or not os.path.isdir(inbox_dir):
+            self.send_json(200, {"files": [], "count": 0, "inbox_dir": inbox_dir, "warning": "INGEST_INBOX_DIR not set or not found"})
+            return
+
+        supported = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".jpg", ".jpeg", ".png"}
+        skip_dirs = {"processed", "error"}
+        files = []
+
+        for root, dirs, fnames in os.walk(inbox_dir):
+            # Prune skipped and hidden directories in-place
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+
+            # Determine department from first-level subfolder name
+            rel = os.path.relpath(root, inbox_dir)
+            if rel == ".":
+                department = "general"
+            else:
+                department = rel.split(os.sep)[0]  # first-level folder only
+
+            for fname in fnames:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in supported:
+                    continue
+                fpath = os.path.join(root, fname)
+                files.append({
+                    "file_name": fname,
+                    "file_path": fpath,
+                    "file_ext": ext,
+                    "file_size": os.path.getsize(fpath),
+                    "department": department,
+                })
+
+        self.send_json(200, {"files": files, "count": len(files), "inbox_dir": inbox_dir})
+
+    def _handle_ingest_file(self, data: dict):
+        """POST /ingest-file  {file_path, department?} -> {success, file_name, chunk_count, error?}"""
+        import shutil
+
+        file_path = data.get("file_path", "").strip()
+        if not file_path:
+            self.send_json(400, {"error": "Missing required field: file_path"})
+            return
+        if not os.path.isfile(file_path):
+            self.send_json(404, {"error": f"File not found: {file_path}"})
+            return
+
+        department = str(data.get("department", "general"))
+        file_name = os.path.basename(file_path)
+        inbox_dir = os.path.dirname(file_path)
+        processed_dir = os.environ.get("INGEST_PROCESSED_DIR", os.path.join(inbox_dir, "..", "processed"))
+        error_dir = os.environ.get("INGEST_ERROR_DIR", os.path.join(inbox_dir, "..", "error"))
+        os.makedirs(processed_dir, exist_ok=True)
+        os.makedirs(error_dir, exist_ok=True)
+
+        def move_file(dest_dir: str):
+            try:
+                shutil.move(file_path, os.path.join(dest_dir, file_name))
+            except Exception as mv_err:
+                sys.stderr.write(f"[api_server] move error: {mv_err}\n")
+
+        try:
+            # Step 1: extract text
+            r1 = self.run_script([sys.executable, str(_SCRIPT_DIR / "extract_text.py"), file_path])
+            if r1.returncode != 0:
+                raise RuntimeError(f"extract_text failed: {r1.stderr.decode('utf-8', errors='replace')[:300]}")
+            extracted = json.loads(r1.stdout.decode("utf-8"))
+            if "error" in extracted:
+                raise RuntimeError(f"extract_text error: {extracted['error']}")
+            text = extracted.get("text", "").strip()
+            if not text:
+                raise RuntimeError("無法取得文字內容（空白或純圖片 PDF）")
+            extracted["metadata"]["department"] = department
+
+            # Step 2: chunk text
+            r2 = self.run_script(
+                [sys.executable, str(_SCRIPT_DIR / "chunk_text.py"), "--text", text],
+            )
+            if r2.returncode != 0:
+                raise RuntimeError(f"chunk_text failed: {r2.stderr.decode('utf-8', errors='replace')[:300]}")
+            chunks = json.loads(r2.stdout.decode("utf-8"))
+            if not isinstance(chunks, list) or len(chunks) == 0:
+                raise RuntimeError("切片結果為空")
+
+            # Step 3: embed chunks
+            chunks_bytes = json.dumps(chunks, ensure_ascii=False).encode("utf-8")
+            r3 = self.run_script([sys.executable, str(_SCRIPT_DIR / "embed_chunks.py")], stdin_data=chunks_bytes)
+            if r3.returncode != 0:
+                raise RuntimeError(f"embed_chunks failed: {r3.stderr.decode('utf-8', errors='replace')[:300]}")
+            embedded_chunks = json.loads(r3.stdout.decode("utf-8"))
+
+            # Step 4: write to DB
+            db_payload = json.dumps({
+                "text": text,
+                "metadata": extracted["metadata"],
+                "ocr_used": extracted.get("ocr_used", False),
+                "page_count": extracted.get("page_count", 1),
+                "chunks": embedded_chunks,
+            }, ensure_ascii=False).encode("utf-8")
+            r4 = self.run_script([sys.executable, str(_SCRIPT_DIR / "write_to_db.py")], stdin_data=db_payload)
+            if r4.returncode != 0:
+                raise RuntimeError(f"write_to_db failed: {r4.stderr.decode('utf-8', errors='replace')[:300]}")
+            db_result = json.loads(r4.stdout.decode("utf-8"))
+
+            move_file(processed_dir)
+            self.send_json(200, {
+                "success": True,
+                "file_name": file_name,
+                "chunk_count": len(embedded_chunks),
+                "db_result": db_result,
+            })
+
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            move_file(error_dir)
+            self.send_json(200, {
+                "success": False,
+                "file_name": file_name,
+                "error": str(e),
+            })
+
+    def _handle_backup_db(self, data: dict):
+        """POST /backup-db  {backup_dir?, keep?} -> {success, backup_file, file_size_mb, deleted_old}"""
+        backup_dir = str(data.get("backup_dir", "") or os.environ.get("BACKUP_DIR", "D:/智能助理資料庫自動備份"))
+        keep = int(data.get("keep", os.environ.get("BACKUP_KEEP", 7)))
+
+        args = [
+            sys.executable, str(_SCRIPT_DIR / "backup_db.py"),
+            "--backup-dir", backup_dir,
+            "--keep", str(keep),
+        ]
+        result = self.run_script(args)
+
+        try:
+            out = json.loads(result.stdout.decode("utf-8"))
+            self.send_json(200, out)
+        except json.JSONDecodeError:
+            self.send_json(500, {
+                "success": False,
+                "error": result.stderr.decode("utf-8", errors="replace"),
+            })
+
     def _handle_prompt_builder(self, data: dict):
         """POST /prompt-builder  {question, chunks, history} -> {system, prompt}"""
         question = data.get("question", "")
@@ -363,7 +520,7 @@ def main():
 
     server = HTTPServer((args.host, args.port), APIHandler)
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files\n")
+    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db\n")
     sys.stderr.flush()
     try:
         server.serve_forever()
