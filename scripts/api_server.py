@@ -122,6 +122,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._handle_search_files(data)
             elif self.path == "/ingest-file":
                 self._handle_ingest_file(data)
+            elif self.path == "/backup-db":
+                self._handle_backup_db(data)
             else:
                 self.send_json(404, {"error": "Not found"})
         except Exception as e:
@@ -433,6 +435,27 @@ class APIHandler(BaseHTTPRequestHandler):
                 "error": str(e),
             })
 
+    def _handle_backup_db(self, data: dict):
+        """POST /backup-db  {backup_dir?, keep?} -> {success, backup_file, file_size_mb, deleted_old}"""
+        backup_dir = str(data.get("backup_dir", "") or os.environ.get("BACKUP_DIR", "D:/智能助理資料庫自動備份"))
+        keep = int(data.get("keep", os.environ.get("BACKUP_KEEP", 7)))
+
+        args = [
+            sys.executable, str(_SCRIPT_DIR / "backup_db.py"),
+            "--backup-dir", backup_dir,
+            "--keep", str(keep),
+        ]
+        result = self.run_script(args)
+
+        try:
+            out = json.loads(result.stdout.decode("utf-8"))
+            self.send_json(200, out)
+        except json.JSONDecodeError:
+            self.send_json(500, {
+                "success": False,
+                "error": result.stderr.decode("utf-8", errors="replace"),
+            })
+
     def _handle_prompt_builder(self, data: dict):
         """POST /prompt-builder  {question, chunks, history} -> {system, prompt}"""
         question = data.get("question", "")
@@ -474,7 +497,7 @@ def main():
 
     server = HTTPServer((args.host, args.port), APIHandler)
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file\n")
+    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db\n")
     sys.stderr.flush()
     try:
         server.serve_forever()

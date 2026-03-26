@@ -1,0 +1,196 @@
+{
+  "name": "DB Auto Backup",
+  "nodes": [
+    {
+      "id": "backup-node-001",
+      "name": "Schedule: Daily 2AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "每天凌晨 2:00 自動備份\ncron: 0 2 * * *\n可修改時間，例如 0 3 * * * 為凌晨 3:00"
+    },
+    {
+      "id": "backup-node-001b",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [200, 480],
+      "parameters": {},
+      "notes": "手動立即備份（測試用）"
+    },
+    {
+      "id": "backup-node-002",
+      "name": "POST: Backup DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/backup-db",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({backup_dir: 'D:/智能助理資料庫自動備份', keep: 7}) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "notes": "呼叫 api_server POST /backup-db\n備份路徑：D:/智能助理資料庫自動備份\n保留最近 7 份（約 7 天）\ntimeout 120 秒"
+    },
+    {
+      "id": "backup-node-003",
+      "name": "IF: Backup OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [700, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "backup-node-004",
+      "name": "Set: Log Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [940, 180],
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "s1",
+              "name": "status",
+              "value": "success",
+              "type": "string"
+            },
+            {
+              "id": "s2",
+              "name": "backup_file",
+              "value": "={{ $json.backup_file }}",
+              "type": "string"
+            },
+            {
+              "id": "s3",
+              "name": "file_size_mb",
+              "value": "={{ $json.file_size_mb }}",
+              "type": "number"
+            },
+            {
+              "id": "s4",
+              "name": "deleted_old",
+              "value": "={{ $json.deleted_old }}",
+              "type": "array"
+            },
+            {
+              "id": "s5",
+              "name": "message",
+              "value": "={{ '✅ 備份完成：' + $json.backup_file + '（' + $json.file_size_mb + ' MB）' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "backup-node-005",
+      "name": "Set: Log Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [940, 420],
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "e1",
+              "name": "status",
+              "value": "error",
+              "type": "string"
+            },
+            {
+              "id": "e2",
+              "name": "error",
+              "value": "={{ $json.error }}",
+              "type": "string"
+            },
+            {
+              "id": "e3",
+              "name": "message",
+              "value": "={{ '❌ 備份失敗：' + ($json.error || '未知錯誤') }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Schedule: Daily 2AM": {
+      "main": [
+        [{"node": "POST: Backup DB", "type": "main", "index": 0}]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [{"node": "POST: Backup DB", "type": "main", "index": 0}]
+      ]
+    },
+    "POST: Backup DB": {
+      "main": [
+        [{"node": "IF: Backup OK?", "type": "main", "index": 0}]
+      ]
+    },
+    "IF: Backup OK?": {
+      "main": [
+        [{"node": "Set: Log Success", "type": "main", "index": 0}],
+        [{"node": "Set: Log Error", "type": "main", "index": 0}]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 0,
+  "updatedAt": "2026-03-26T00:00:00.000Z",
+  "versionId": "backup-v1-001"
+}
