@@ -1,6 +1,8 @@
 # Claude Code 開發規格書：企業文件自動匯入 PostgreSQL + pgvector
 
-更新日期：2026-03-24
+更新日期：2026-03-26
+
+> **實作狀態：✅ 全部完成並驗收通過**
 
 ## 一、任務目標
 
@@ -228,3 +230,42 @@ flowchart TD
 ## 十一、結論
 
 本任務的核心不是單純把檔案搬進資料庫，而是要建立一條可穩定運作的文件知識化流程。請以「原始檔留在儲存系統、可檢索內容進 PostgreSQL + pgvector」為主原則實作，並預留後續串接企業問答助理與權限檢索的擴充空間。
+
+---
+
+## 十二、驗收結果（2026-03-26）
+
+### ✅ 驗收全部通過
+
+| 驗收項目 | 結果 |
+|---|---|
+| Word 文字抽取 + 向量化 | ✅ .docx 正常處理 |
+| 文字型 PDF 抽取 + 向量化 | ✅ 楊富段投報分析.pdf → 4 個切片 |
+| 圖片 OCR | ✅ .jpg 正常走 OCR 分支 |
+| Excel 文字化 | ✅ .xls/.xlsx 正常處理 |
+| 重複檔案不重複匯入（SHA-256） | ✅ 已存在的 hash 自動略過 |
+| 失敗檔案移至 error，DB 有 log | ✅ |
+| 成功檔案移至 processed | ✅ |
+
+### 交付物清單
+
+| 檔案 | 說明 |
+|---|---|
+| `workflows/ingest_workflow_v2.json` | n8n 文件匯入 workflow（9 個節點，HTTP Request 架構） |
+| `scripts/api_server.py` | HTTP API Server，含 `/list-inbox`、`/ingest-file` 端點 |
+| `scripts/extract_text.py` | 多格式文字抽取（PDF/Word/Excel/JPG/PNG） |
+| `scripts/chunk_text.py` | 文字切片（800字/片，overlap 150字） |
+| `scripts/embed_chunks.py` | Ollama bge-m3 Embedding（1024維） |
+| `scripts/write_to_db.py` | 寫入 documents / document_contents / document_chunks / permissions |
+| `scripts/batch_ingest.py` | 命令列批次匯入工具（手動使用） |
+| `n8n自動存入資料庫/02_postgresql_schema.sql` | 完整 Schema（7 張資料表 + trigger） |
+| `config/.env.example` | 環境變數範本 |
+
+### 超出規格書的實作
+
+| 功能 | 說明 |
+|---|---|
+| 子資料夾自動分類 | 第一層子資料夾名稱自動成為 `department` 標籤 |
+| 檔案下載 API | `GET /files/<name>` 供 LINE Bot 提供原始檔案下載 |
+| 自動備份 workflow | `backup_workflow.json`，每天凌晨 2:00 自動備份，保留 7 份 |
+| n8n 2.12+ 相容 | 全面改用 HTTP Request 取代已封鎖的 executeCommand |

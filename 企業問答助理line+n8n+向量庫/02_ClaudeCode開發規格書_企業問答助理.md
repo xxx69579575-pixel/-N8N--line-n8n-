@@ -1,6 +1,9 @@
 # Claude Code 開發規格書：企業問答助理 LINE + n8n + 向量庫
 
-更新日期：2026-03-24
+更新日期：2026-03-26
+
+> **實作狀態：✅ 全部完成**
+> 問答流程、文件匯入流程、自動備份均已完成部署與測試。
 
 ## 一、任務目標
 
@@ -247,3 +250,47 @@ flowchart TD
 ## 十三、結論
 
 本任務重點在於把 LINE、n8n、本地 Qwen2.5 與向量資料庫串成一條穩定可用的企業問答流程。請優先確保檢索與回答鏈條可用，再逐步優化權限、多輪上下文與回答品質。
+
+---
+
+## 十四、驗收結果（2026-03-26）
+
+### ✅ 全部驗收通過
+
+| 驗收項目 | 結果 |
+|---|---|
+| LINE 問題進入 n8n | ✅ |
+| embedding 向量化 | ✅ bge-m3（1024 維） |
+| pgvector Top-K 檢索 | ✅ 含檔名過濾、相似度閾值 |
+| Qwen2.5 生成回答 | ✅ qwen2.5:7b-instruct-q4_0 |
+| LINE 回覆 | ✅ 含 Quick Reply 選單 |
+| QA log 寫入 | ✅ qa_logs 資料表 |
+| 查無資料不亂答 | ✅ 回覆「目前知識庫中沒有相關資料」 |
+
+### 實際交付物清單
+
+| 檔案 | 說明 |
+|---|---|
+| `workflows/qa_workflow.json` | LINE 問答 n8n workflow（40 節點） |
+| `workflows/ingest_workflow_v2.json` | 文件自動匯入 workflow（每小時） |
+| `workflows/backup_workflow.json` | 資料庫自動備份 workflow（每天凌晨 2:00） |
+| `scripts/api_server.py` | Python HTTP API Server（9 個端點） |
+| `scripts/extract_text.py` | 文字抽取（PDF/Word/Excel/圖片 OCR） |
+| `scripts/chunk_text.py` | 文字切片 |
+| `scripts/embed_chunks.py` | Ollama Embedding |
+| `scripts/write_to_db.py` | 寫入 PostgreSQL + pgvector |
+| `scripts/backup_db.py` | pg_dump 備份腳本 |
+| `config/.env.example` | 環境變數範本 |
+| `n8n自動存入資料庫/02_postgresql_schema.sql` | 完整資料庫 Schema（7 張資料表） |
+| `start_api_server.bat` | Windows 啟動腳本 |
+| `start_ngrok.bat` | ngrok tunnel 啟動腳本 |
+
+### 額外完成的功能（規格書外）
+
+- **子資料夾自動分類**：文件收件匣的子資料夾名稱自動成為 `department` 標籤
+- **檔案下載 API**：`GET /files/<name>` 供 LINE Bot 提供原始檔案下載連結
+- **檔名關鍵字搜尋**：`POST /search-files` 供用戶查找特定文件
+- **指定檔案問答**：LINE Quick Reply「問:檔名」功能，針對單一文件提問
+- **Session 狀態機**：多輪對話記憶，自動追蹤用戶當前操作模式
+- **授權用戶管理**：`allowed_users` 資料表控制 LINE Bot 存取權限
+- **開機自動啟動**：Windows Startup 設定，重開機後所有服務自動恢復
