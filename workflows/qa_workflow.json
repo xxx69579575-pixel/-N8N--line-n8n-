@@ -439,7 +439,7 @@
         "operation": "executeQuery",
         "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, NULL)\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = NULL, updated_at = NOW()",
         "options": {
-          "queryParameters": "={{ JSON.stringify([$json.lineUserId]) }}"
+          "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId]) }}"
         }
       },
       "credentials": {
@@ -493,7 +493,7 @@
         "operation": "executeQuery",
         "query": "INSERT INTO conversation_sessions (line_user_id, turns, mode)\nVALUES ($1, '[]'::jsonb, 'waiting_keyword')\nON CONFLICT (line_user_id)\nDO UPDATE SET mode = 'waiting_keyword', updated_at = NOW()",
         "options": {
-          "queryParameters": "={{ JSON.stringify([$json.lineUserId]) }}"
+          "queryParameters": "={{ JSON.stringify([$('Intent Router').first().json.lineUserId]) }}"
         }
       },
       "credentials": {
