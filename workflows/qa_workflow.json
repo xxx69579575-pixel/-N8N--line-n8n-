@@ -272,7 +272,7 @@
       "position": [4000, 300],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const response = $input.item.json;\nconst answer = (response.message && response.message.content) || response.response || '';\nconst prevData = $('Parse Prompt').first().json;\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    answer: answer || '抱歉，目前無法生成回答，請稍後再試。'\n  }\n};"
+        "jsCode": "const response = $input.item.json;\nconst answer = (response.message && response.message.content) || response.response || '抱歉，目前無法生成回答，請稍後再試。';\nconst prevData = $('Parse Prompt').first().json;\n\n// Build LINE reply body here (not in HTTP Request) to avoid emoji in n8n expression parser\nconst replyBody = JSON.stringify({\n  replyToken: prevData.replyToken,\n  messages: [{\n    type: 'text',\n    text: answer,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u627E\\u6A94\\u6848', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    answer: answer,\n    replyBody: replyBody\n  }\n};"
       },
       "notes": "Extracts answer from Ollama response. References 'Parse Prompt'."
     },
@@ -301,7 +301,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({replyToken: $json.replyToken, messages: [{type: 'text', text: $json.answer, quickReply: {items: [{type: 'action', action: {type: 'message', label: '🔍 找檔案', text: '找檔案'}}, {type: 'action', action: {type: 'message', label: '💬 問問題', text: '問問題'}}]}}]}) }}",
+        "body": "={{ $json.replyBody }}",
         "options": {
           "timeout": 30000
         }
@@ -393,7 +393,7 @@
       "position": [2750, 600],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "// TODO: Update PUBLIC_API_BASE_URL to your Named Tunnel URL once configured\n// e.g. https://your-api-tunnel.trycloudflare.com\nconst PUBLIC_API_BASE_URL = 'https://peninsula-logo-seriously-chronic.trycloudflare.com'; // Cloudflare Quick Tunnel (restart if URL changed)\n\nconst resp = $input.item.json;\nconst intentData = $('Intent Router').first().json;\nconst results = (resp && Array.isArray(resp.results)) ? resp.results : [];\nconst keyword = intentData.keyword || '';\n\nlet replyText;\nif (results.length === 0) {\n  replyText = `找不到包含「${keyword}」的檔案。\\n\\n請嘗試其他關鍵字，或直接輸入「找檔案」重試。`;\n} else {\n  const lines = [`找到 ${results.length} 個相關檔案：\\n`];\n  results.slice(0, 10).forEach(function(r, i) {\n    const url = PUBLIC_API_BASE_URL + r.download_url;\n    lines.push(`${i + 1}. ${r.file_name}`);\n    lines.push(`   下載：${url}`);\n  });\n  if (results.length > 10) {\n    lines.push(`\\n（共 ${results.length} 筆，顯示前 10 筆）`);\n  }\n  replyText = lines.join('\\n');\n}\n\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    replyToken: intentData.replyToken,\n    replyText: replyText\n  }\n};"
+        "jsCode": "// TODO: Update PUBLIC_API_BASE_URL to your Named Tunnel URL once configured\nconst PUBLIC_API_BASE_URL = 'https://peninsula-logo-seriously-chronic.trycloudflare.com'; // Cloudflare Quick Tunnel\n\nconst resp = $input.item.json;\nconst intentData = $('Intent Router').first().json;\nconst results = (resp && Array.isArray(resp.results)) ? resp.results : [];\nconst keyword = intentData.keyword || '';\n\nlet replyText;\nif (results.length === 0) {\n  replyText = '\\u627E\\u4E0D\\u5230\\u5305\\u542B\\u300C' + keyword + '\\u300D\\u7684\\u6A94\\u6848\\u3002\\n\\n\\u8ACB\\u5617\\u8A66\\u5176\\u4ED6\\u95DC\\u9375\\u5B57\\uFF0C\\u6216\\u8F38\\u5165\\u300C\\u627E\\u6A94\\u6848\\u300D\\u91CD\\u8A66\\u3002';\n} else {\n  const lines = ['\\u627E\\u5230 ' + results.length + ' \\u500B\\u76F8\\u95DC\\u6A94\\u6848\\uFF1A\\n'];\n  results.slice(0, 10).forEach(function(r, i) {\n    const url = PUBLIC_API_BASE_URL + r.download_url;\n    lines.push((i + 1) + '. ' + r.file_name);\n    lines.push('   \\u4E0B\\u8F09\\uFF1A' + url);\n  });\n  if (results.length > 10) {\n    lines.push('\\n\\uFF08\\u5171 ' + results.length + ' \\u7B46\\uFF0C\\u986F\\u793A\\u524D 10 \\u7B46\\uFF09');\n  }\n  replyText = lines.join('\\n');\n}\n\n// Build reply body with quickReply using unicode escapes (avoid emoji in expression engine)\nconst replyBody = JSON.stringify({\n  replyToken: intentData.replyToken,\n  messages: [{\n    type: 'text',\n    text: replyText,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u518D\\u627E\\u4E00\\u6B21', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    replyToken: intentData.replyToken,\n    replyText: replyText,\n    replyBody: replyBody\n  }\n};"
       },
       "notes": "Formats file search results as LINE text message. PUBLIC_API_BASE_URL must be updated to Named Tunnel URL for users to download via LINE."
     },
@@ -422,7 +422,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({replyToken: $json.replyToken, messages: [{type: 'text', text: $json.replyText, quickReply: {items: [{type: 'action', action: {type: 'message', label: '🔍 再找一次', text: '找檔案'}}, {type: 'action', action: {type: 'message', label: '💬 問問題', text: '問問題'}}]}}]}) }}",
+        "body": "={{ $json.replyBody }}",
         "options": {
           "timeout": 30000
         }
