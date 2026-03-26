@@ -130,7 +130,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const parsedMsg = $('Parse Message').first().json;\nconst text = parsedMsg.messageText || '';\nconst sessionData = $input.item.json;\nconst mode = sessionData.mode || null;\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\nlet askFileName = '';\n\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\nif (text.startsWith('\\u554f:')) {\n  intent = 'ask_about_file';\n  askFileName = text.slice(2).trim();\n} else if (mode && mode.startsWith('asking_about:')) {\n  intent = 'file_qa';\n  askFileName = mode.slice('asking_about:'.length);\n  keyword = text;\n} else if (mode === 'waiting_filetype') {\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa';\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1];\n} else if (text === '\\u627e\\u6a94\\u6848') {\n  intent = 'file_search_menu';\n} else {\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: parsedMsg.lineUserId,\n    messageText: text,\n    replyToken: parsedMsg.replyToken,\n    sessionMode: mode,\n    sessionTurns: sessionData.turns || [],\n    intent,\n    keyword,\n    fileType,\n    askFileName,\n  }\n};"
+        "jsCode": "const parsedMsg = $('Parse Message').first().json;\nconst text = parsedMsg.messageText || '';\nconst sessionData = $input.item.json;\nconst mode = sessionData.mode || null;\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\nlet askFileName = '';\n\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\n// 保留關鍵字優先於 session mode（點選 Quick Reply 固定按鈕時）\nif (text === '找檔案') {\n  intent = 'file_search_menu';\n} else if (text === '問問題') {\n  intent = 'qa';\n} else if (text.startsWith('問:')) {\n  intent = 'ask_about_file';\n  askFileName = text.slice(2).trim();\n} else if (mode && mode.startsWith('asking_about:')) {\n  intent = 'file_qa';\n  askFileName = mode.slice('asking_about:'.length);\n  keyword = text;\n} else if (mode === 'waiting_filetype') {\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa';\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1];\n} else {\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: parsedMsg.lineUserId,\n    messageText: text,\n    replyToken: parsedMsg.replyToken,\n    sessionMode: mode,\n    sessionTurns: sessionData.turns || [],\n    intent,\n    keyword,\n    fileType,\n    askFileName,\n  }\n};"
       },
       "notes": "Determines intent: 'qa' (RAG), 'file_search_execute' (when mode=waiting_keyword), 'file_search_menu' (when text='找檔案'). Sets keyword for file_search_execute."
     },
@@ -203,7 +203,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: 0.5, file_name: $json.askFileName || ''}) }}",
+        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: $json.askFileName ? 0.2 : 0.5, file_name: $json.askFileName || ''}) }}",
         "options": {
           "timeout": 60000
         }
