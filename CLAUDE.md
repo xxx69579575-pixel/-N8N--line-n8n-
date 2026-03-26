@@ -1,7 +1,18 @@
-# CLAUDE.md
+# AI 企業問答助理 — 快速安裝主控指南
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+> **此分支（快速安裝）專為在新電腦上快速部署而設計。**
+> 詳細安裝步驟請讀取 `快速安裝指南/CLAUDE.md`，以下為快速入口。
 
+---
+
+## Claude Code 請立即執行
+
+1. 讀取 `快速安裝指南/CLAUDE.md` — 取得完整安裝流程
+2. 依序執行：偵測 OS → 環境檢查 → 收集用戶資訊 → 安裝 → 驗證
+
+---
+
+<!-- 以下為開發參考（安裝時不需閱讀）-->
 ## 專案定位
 
 本地 AI 企業問答助理，採 RAG 架構。兩條主要 n8n 工作流：
