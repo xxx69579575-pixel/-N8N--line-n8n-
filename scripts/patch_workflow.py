@@ -32,20 +32,25 @@ if (results.length === 0) {
           type: 'text',
           text: displayName,
           wrap: true,
-          flex: 5,
+          flex: 4,
           size: 'sm',
-          color: '#333333'
-        },
-        {
-          type: 'button',
-          style: 'primary',
-          height: 'sm',
-          flex: 2,
-          color: '#1DB446',
+          color: '#1a73e8',
+          decoration: 'underline',
           action: {
             type: 'uri',
             label: '\u4e0b\u8f09',
             uri: url
+          }
+        },
+        {
+          type: 'button',
+          style: 'secondary',
+          height: 'sm',
+          flex: 2,
+          action: {
+            type: 'message',
+            label: '\u554f',
+            text: '\u554f:' + r.file_name
           }
         }
       ]
@@ -98,27 +103,6 @@ if (results.length === 0) {
     contents: flexContent
   };
 }
-
-var fileQRItems = results.slice(0, 3).map(function(r, i) {
-  var label = '\u554f: ' + r.file_name.slice(0, 17);
-  return {
-    type: 'action',
-    action: {
-      type: 'message',
-      label: label,
-      text: '\u554f:' + r.file_name
-    }
-  };
-});
-
-var standardQRItems = [
-  { type: 'action', action: { type: 'message', label: '\U0001F50D \u518d\u627e\u4e00\u6b21', text: '\u627e\u6a94\u6848' } },
-  { type: 'action', action: { type: 'message', label: '\U0001F4AC \u554f\u554f\u984c', text: '\u554f\u554f\u984c' } }
-];
-
-message.quickReply = {
-  items: fileQRItems.concat(standardQRItems)
-};
 
 var replyBody = JSON.stringify({
   replyToken: intentData.replyToken,

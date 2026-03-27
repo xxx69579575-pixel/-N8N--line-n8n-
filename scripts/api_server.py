@@ -240,13 +240,16 @@ class APIHandler(BaseHTTPRequestHandler):
             if candidate.startswith(base_dir + os.sep) and os.path.isfile(candidate):
                 target = candidate
 
-        # If DB path no longer exists, search processed/ folder (file moved after ingest)
+        # If DB path no longer exists, search processed/ folder recursively (file moved after ingest)
         if target and not os.path.isfile(target):
             inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
             if inbox_dir:
-                processed_candidate = os.path.join(inbox_dir, "processed", os.path.basename(target))
-                if os.path.isfile(processed_candidate):
-                    target = processed_candidate
+                processed_root = os.path.join(inbox_dir, "processed")
+                search_name = os.path.basename(target)
+                for dirpath, _, filenames in os.walk(processed_root):
+                    if search_name in filenames:
+                        target = os.path.join(dirpath, search_name)
+                        break
 
         if not target or not os.path.isfile(target):
             self.send_json(404, {"error": f"File not found: {filename}"})
@@ -256,9 +259,21 @@ class APIHandler(BaseHTTPRequestHandler):
             with open(target, "rb") as f:
                 content = f.read()
             encoded_name = urllib.parse.quote(os.path.basename(target), safe="")
+            ext = os.path.splitext(target)[1].lower()
+            mime_map = {
+                ".pdf":  ("application/pdf",  "inline"),
+                ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "attachment"),
+                ".doc":  ("application/msword", "attachment"),
+                ".xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "attachment"),
+                ".xls":  ("application/vnd.ms-excel", "attachment"),
+                ".jpg":  ("image/jpeg", "inline"),
+                ".jpeg": ("image/jpeg", "inline"),
+                ".png":  ("image/png",  "inline"),
+            }
+            content_type, disposition = mime_map.get(ext, ("application/octet-stream", "attachment"))
             self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_name}")
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{encoded_name}")
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
@@ -394,15 +409,21 @@ class APIHandler(BaseHTTPRequestHandler):
 
         department = str(data.get("department", "general"))
         file_name = os.path.basename(file_path)
-        inbox_dir = os.path.dirname(file_path)
-        processed_dir = os.environ.get("INGEST_PROCESSED_DIR", os.path.join(inbox_dir, "..", "processed"))
-        error_dir = os.environ.get("INGEST_ERROR_DIR", os.path.join(inbox_dir, "..", "error"))
-        os.makedirs(processed_dir, exist_ok=True)
-        os.makedirs(error_dir, exist_ok=True)
+        inbox_root = os.path.abspath(os.environ.get("INGEST_INBOX_DIR", os.path.join(os.path.dirname(file_path), "..")))
+        processed_root = os.path.abspath(os.environ.get("INGEST_PROCESSED_DIR", os.path.join(inbox_root, "processed")))
+        error_root = os.path.abspath(os.environ.get("INGEST_ERROR_DIR", os.path.join(inbox_root, "error")))
 
-        def move_file(dest_dir: str):
+        # Compute relative path from inbox root to preserve folder structure
+        try:
+            rel_path = os.path.relpath(os.path.abspath(file_path), inbox_root)
+        except ValueError:
+            rel_path = file_name  # fallback: different drive
+
+        def move_file(dest_root: str):
             try:
-                shutil.move(file_path, os.path.join(dest_dir, file_name))
+                dest_path = os.path.join(dest_root, rel_path)
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.move(file_path, dest_path)
             except Exception as mv_err:
                 sys.stderr.write(f"[api_server] move error: {mv_err}\n")
 
@@ -449,7 +470,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise RuntimeError(f"write_to_db failed: {r4.stderr.decode('utf-8', errors='replace')[:300]}")
             db_result = json.loads(r4.stdout.decode("utf-8"))
 
-            move_file(processed_dir)
+            move_file(processed_root)
             self.send_json(200, {
                 "success": True,
                 "file_name": file_name,
@@ -459,7 +480,7 @@ class APIHandler(BaseHTTPRequestHandler):
 
         except Exception as e:
             traceback.print_exc(file=sys.stderr)
-            move_file(error_dir)
+            move_file(error_root)
             self.send_json(200, {
                 "success": False,
                 "file_name": file_name,
