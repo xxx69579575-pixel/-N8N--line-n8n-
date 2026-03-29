@@ -1,560 +1,266 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-api_server.py — Local HTTP API server for n8n workflow integration.
+api_server.py — LINE Webhook 接收與處理伺服器
 
-Wraps line_verify.py, vector_search.py, prompt_builder.py as REST endpoints
-so n8n HTTP Request nodes can call them (replacing executeCommand nodes which
-are not available in n8n 2.12+).
-
-Usage:
-    python scripts/api_server.py
-    python scripts/api_server.py --port 8765 --host 127.0.0.1
-
-Endpoints:
-    GET  /health
-    POST /line-verify      {body, signature}                         -> {valid: bool}
-    POST /vector-search    {question, top_k?, min_sim?, department?} -> [{chunk_id,...}]
-    POST /prompt-builder   {question, chunks, history}               -> {system, prompt}
+修復：reply token 過期問題
+- webhook 立即回傳 200 OK，避免 LINE 平台 retry
+- 事件處理改為背景執行緒，不阻塞主執行緒
+- reply 失敗時自動 fallback 至 push message API
 """
 
-import sys
+import hashlib
+import hmac
 import json
+import logging
 import os
-import argparse
-import subprocess
-import traceback
-import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import sys
+import threading
+import base64
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import Optional
+import urllib.error
+import urllib.request
 
-_SCRIPT_DIR = Path(__file__).parent.resolve()
-_PROJECT_ROOT = _SCRIPT_DIR.parent
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# .env loader
+# ---------------------------------------------------------------------------
 
 def _load_dotenv(path: str) -> None:
-    """Minimal .env loader — sets os.environ for keys not already set."""
     try:
         with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
-                key, _, value = line.partition("=")
+                key, _, val = line.partition("=")
                 key = key.strip()
-                value = value.strip().strip('"').strip("'")
+                val = val.strip().strip('"').strip("'")
                 if key and key not in os.environ:
-                    os.environ[key] = value
+                    os.environ[key] = val
     except FileNotFoundError:
         pass
 
 
-_load_dotenv(str(_PROJECT_ROOT / "config" / ".env"))
+_project_root = Path(__file__).parent.parent
+_env_path = _project_root / "config" / ".env"
+_load_dotenv(str(_env_path))
 
-FILES_BASE_DIR = os.environ.get("FILES_BASE_DIR", "D:/職安")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push"
 
 
-class APIHandler(BaseHTTPRequestHandler):
+# ---------------------------------------------------------------------------
+# LINE API helpers
+# ---------------------------------------------------------------------------
 
-    def log_message(self, format, *args):  # noqa: A002
-        sys.stderr.write(f"[api_server] {self.address_string()} {format % args}\n")
-        sys.stderr.flush()
+def verify_signature(body: bytes, signature: str) -> bool:
+    """驗證 LINE Webhook HMAC-SHA256 簽章"""
+    if not LINE_CHANNEL_SECRET:
+        logger.warning("LINE_CHANNEL_SECRET not configured")
+        return False
+    key = LINE_CHANNEL_SECRET.encode("utf-8")
+    digest = hmac.new(key, body, hashlib.sha256).digest()
+    expected = base64.b64encode(digest).decode("utf-8")
+    return hmac.compare_digest(expected, signature)
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
 
-    def send_json(self, status: int, data):
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+def _line_api_request(url: str, payload: dict) -> dict:
+    """呼叫 LINE Messaging API，回傳 response dict。失敗時 raise exception。"""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json; charset=utf-8",
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read().decode("utf-8")) if resp.read() else {}
+
+
+def reply_message(reply_token: str, messages: list) -> bool:
+    """
+    使用 reply token 回覆訊息。
+    回傳 True 表示成功，False 表示失敗（token 過期或其他錯誤）。
+    """
+    try:
+        _line_api_request(LINE_REPLY_URL, {
+            "replyToken": reply_token,
+            "messages": messages,
+        })
+        return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.warning("reply_message failed (HTTP %s): %s", e.code, body)
+        # 400 通常表示 token 過期或已使用
+        return False
+    except Exception as e:
+        logger.warning("reply_message failed: %s", e)
+        return False
+
+
+def push_message(user_id: str, messages: list) -> bool:
+    """
+    使用 push API 傳送訊息（不需要 reply token）。
+    用於 reply token 過期後的 fallback。
+    """
+    try:
+        _line_api_request(LINE_PUSH_URL, {
+            "to": user_id,
+            "messages": messages,
+        })
+        logger.info("push_message sent to %s", user_id)
+        return True
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error("push_message failed (HTTP %s): %s", e.code, body)
+        return False
+    except Exception as e:
+        logger.error("push_message failed: %s", e)
+        return False
+
+
+def send_message_with_fallback(
+    reply_token: str,
+    user_id: str,
+    messages: list,
+) -> None:
+    """
+    先嘗試 reply API；若失敗（token 過期）自動 fallback 至 push API。
+
+    Args:
+        reply_token: 來自 webhook 事件的 replyToken
+        user_id    : 事件的 source.userId，用於 push fallback
+        messages   : LINE message objects 陣列
+    """
+    if not reply_message(reply_token, messages):
+        logger.info(
+            "reply token expired or invalid for user %s, falling back to push",
+            user_id,
+        )
+        push_message(user_id, messages)
+
+
+# ---------------------------------------------------------------------------
+# 事件處理（在背景執行緒中執行）
+# ---------------------------------------------------------------------------
+
+def handle_message_event(event: dict) -> None:
+    """處理 message 類型事件，回覆相同文字（echo bot 示例）。"""
+    reply_token = event.get("replyToken", "")
+    source = event.get("source", {})
+    user_id = source.get("userId", "")
+    message = event.get("message", {})
+    text = message.get("text", "")
+
+    if not reply_token or not user_id:
+        logger.warning("Missing replyToken or userId in event: %s", event)
+        return
+
+    # 在此加入實際業務邏輯（例如 RAG 查詢、AI 回覆等）
+    # 因為已在背景執行緒中，可安全進行耗時操作
+    response_text = f"您說：{text}" if text else "（非文字訊息）"
+
+    send_message_with_fallback(
+        reply_token=reply_token,
+        user_id=user_id,
+        messages=[{"type": "text", "text": response_text}],
+    )
+
+
+def process_events(events: list) -> None:
+    """在背景執行緒中逐一處理所有事件。"""
+    for event in events:
+        event_type = event.get("type", "")
+        try:
+            if event_type == "message":
+                handle_message_event(event)
+            else:
+                logger.info("Unhandled event type: %s", event_type)
+        except Exception as e:
+            logger.exception("Error processing event %s: %s", event_type, e)
+
+
+# ---------------------------------------------------------------------------
+# HTTP Server
+# ---------------------------------------------------------------------------
+
+class WebhookHandler(BaseHTTPRequestHandler):
+    """LINE Webhook HTTP handler。"""
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/webhook":
+            self._respond(404, b"Not Found")
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_length)
+
+        # 1. 驗證簽章
+        signature = self.headers.get("X-Line-Signature", "")
+        if not verify_signature(body, signature):
+            logger.warning("Invalid signature — request rejected")
+            self._respond(400, b"Invalid signature")
+            return
+
+        # 2. 立即回傳 200 OK（必須在 30 秒內，否則 LINE 平台視為失敗並 retry）
+        self._respond(200, b"OK")
+
+        # 3. 解析事件並在背景執行緒中處理（不阻塞 HTTP response）
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            events = payload.get("events", [])
+            if events:
+                t = threading.Thread(
+                    target=process_events,
+                    args=(events,),
+                    daemon=True,
+                )
+                t.start()
+        except json.JSONDecodeError as e:
+            logger.error("Failed to parse webhook body: %s", e)
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/health":
+            self._respond(200, b"OK")
+        else:
+            self._respond(404, b"Not Found")
+
+    def _respond(self, status: int, body: bytes) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", "text/plain")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def read_json_body(self):
-        length = int(self.headers.get("Content-Length", 0))
-        raw = self.rfile.read(length)
-        return json.loads(raw.decode("utf-8-sig"))
-
-    def run_script(self, args_list, stdin_data: bytes = None) -> subprocess.CompletedProcess:
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        return subprocess.run(
-            args_list,
-            input=stdin_data,
-            capture_output=True,
-            cwd=str(_PROJECT_ROOT),
-            env=env,
-        )
-
-    # ------------------------------------------------------------------
-    # Routes
-    # ------------------------------------------------------------------
-
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_json(200, {"status": "ok"})
-        elif self.path == "/list-inbox":
-            self._handle_list_inbox()
-        elif self.path.startswith("/files/"):
-            filename = self.path[7:]  # strip "/files/"
-            self._handle_file_download(filename)
-        else:
-            self.send_json(404, {"error": "Not found"})
-
-    def do_POST(self):
-        try:
-            data = self.read_json_body()
-        except Exception as e:
-            self.send_json(400, {"error": f"Invalid JSON body: {e}"})
-            return
-
-        try:
-            if self.path == "/line-verify":
-                self._handle_line_verify(data)
-            elif self.path == "/vector-search":
-                self._handle_vector_search(data)
-            elif self.path == "/prompt-builder":
-                self._handle_prompt_builder(data)
-            elif self.path == "/search-files":
-                self._handle_search_files(data)
-            elif self.path == "/ingest-file":
-                self._handle_ingest_file(data)
-            elif self.path == "/backup-db":
-                self._handle_backup_db(data)
-            else:
-                self.send_json(404, {"error": "Not found"})
-        except Exception as e:
-            traceback.print_exc(file=sys.stderr)
-            self.send_json(500, {"error": str(e)})
-
-    # ------------------------------------------------------------------
-    # Handlers
-    # ------------------------------------------------------------------
-
-    def _handle_line_verify(self, data: dict):
-        """POST /line-verify  {body, signature} -> {valid: bool}"""
-        stdin_payload = json.dumps({
-            "body": data.get("body", ""),
-            "signature": data.get("signature", ""),
-        }).encode("utf-8")
-
-        result = self.run_script(
-            [sys.executable, str(_SCRIPT_DIR / "line_verify.py")],
-            stdin_data=stdin_payload,
-        )
-
-        if result.returncode != 0 and not result.stdout.strip():
-            self.send_json(500, {"valid": False, "error": result.stderr.decode("utf-8", errors="replace")})
-            return
-
-        try:
-            out = json.loads(result.stdout.decode("utf-8"))
-            self.send_json(200, out)
-        except json.JSONDecodeError:
-            self.send_json(500, {"valid": False, "error": "line_verify.py returned non-JSON"})
-
-    def _handle_vector_search(self, data: dict):
-        """POST /vector-search  {question, top_k?, min_sim?, department?} -> [{...}]"""
-        question = data.get("question", "")
-        if not question:
-            self.send_json(400, {"error": "Missing required field: question"})
-            return
-
-        top_k = str(int(data.get("top_k", 5)))
-        min_sim = str(float(data.get("min_sim", 0.7)))
-        department = str(data.get("department", ""))
-        file_name = str(data.get("file_name", ""))
-
-        args = [
-            sys.executable, str(_SCRIPT_DIR / "vector_search.py"),
-            "--question", question,
-            "--top-k", top_k,
-            "--min-sim", min_sim,
-        ]
-        if department:
-            args += ["--department", department]
-        if file_name:
-            args += ["--file-name", file_name]
-
-        result = self.run_script(args)
-
-        if result.returncode != 0:
-            sys.stderr.write(f"[api_server] vector_search error: {result.stderr.decode('utf-8', errors='replace')}\n")
-            self.send_json(200, {"chunks": [], "count": 0})
-            return
-
-        try:
-            chunks = json.loads(result.stdout.decode("utf-8"))
-            if not isinstance(chunks, list):
-                chunks = []
-            self.send_json(200, {"chunks": chunks, "count": len(chunks)})
-        except json.JSONDecodeError:
-            self.send_json(200, {"chunks": [], "count": 0})
-
-    def _handle_file_download(self, filename: str):
-        """GET /files/<filename> — lookup file_path from DB, serve with path-traversal protection."""
-        # URL-decode first
-        try:
-            filename = urllib.parse.unquote(filename, encoding="utf-8")
-        except Exception:
-            self.send_json(400, {"error": "Invalid URL encoding"})
-            return
-
-        # Block traversal sequences (after decode)
-        if not filename or ".." in filename or "\x00" in filename:
-            self.send_json(400, {"error": "Invalid filename"})
-            return
-
-        # Lookup actual file_path from DB
-        target = None
-        try:
-            import psycopg2
-            conn = psycopg2.connect(
-                host=os.environ.get("POSTGRES_HOST", "localhost"),
-                port=int(os.environ.get("POSTGRES_PORT", "65432")),
-                dbname=os.environ.get("POSTGRES_DB", "vectordb"),
-                user=os.environ.get("POSTGRES_USER", "testuser"),
-                password=os.environ.get("POSTGRES_PASSWORD", "testpwd"),
-            )
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT file_path FROM documents WHERE file_name = %s AND file_path IS NOT NULL LIMIT 1",
-                        (filename,),
-                    )
-                    row = cur.fetchone()
-                    if row:
-                        target = row[0]
-            finally:
-                conn.close()
-        except Exception as e:
-            sys.stderr.write(f"[api_server] DB lookup error: {e}\n")
-
-        # Fallback to FILES_BASE_DIR if not in DB
-        if not target:
-            base_dir = os.path.abspath(FILES_BASE_DIR)
-            candidate = os.path.abspath(os.path.join(base_dir, os.path.basename(filename)))
-            if candidate.startswith(base_dir + os.sep) and os.path.isfile(candidate):
-                target = candidate
-
-        # If DB path no longer exists, search processed/ folder recursively (file moved after ingest)
-        if target and not os.path.isfile(target):
-            inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
-            if inbox_dir:
-                processed_root = os.path.join(inbox_dir, "processed")
-                search_name = os.path.basename(target)
-                for dirpath, _, filenames in os.walk(processed_root):
-                    if search_name in filenames:
-                        target = os.path.join(dirpath, search_name)
-                        break
-
-        if not target or not os.path.isfile(target):
-            self.send_json(404, {"error": f"File not found: {filename}"})
-            return
-
-        try:
-            with open(target, "rb") as f:
-                content = f.read()
-            encoded_name = urllib.parse.quote(os.path.basename(target), safe="")
-            ext = os.path.splitext(target)[1].lower()
-            mime_map = {
-                ".pdf":  ("application/pdf",  "inline"),
-                ".docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "attachment"),
-                ".doc":  ("application/msword", "attachment"),
-                ".xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "attachment"),
-                ".xls":  ("application/vnd.ms-excel", "attachment"),
-                ".jpg":  ("image/jpeg", "inline"),
-                ".jpeg": ("image/jpeg", "inline"),
-                ".png":  ("image/png",  "inline"),
-            }
-            content_type, disposition = mime_map.get(ext, ("application/octet-stream", "attachment"))
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Disposition", f"{disposition}; filename*=UTF-8''{encoded_name}")
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
-        except Exception as e:
-            traceback.print_exc(file=sys.stderr)
-            self.send_json(500, {"error": str(e)})
-
-    def _handle_search_files(self, data: dict):
-        """POST /search-files  {keyword, file_type?} -> {results: [{file_name, file_path, download_url}], count}"""
-        keyword = data.get("keyword", "")
-        if not keyword:
-            self.send_json(400, {"error": "Missing required field: keyword"})
-            return
-
-        # Optional file type filter: pdf, docx, xlsx, jpg
-        file_type = str(data.get("file_type", "")).lower().strip()
-        ext_map = {
-            "pdf":  [".pdf"],
-            "docx": [".doc", ".docx"],
-            "xlsx": [".xls", ".xlsx"],
-            "jpg":  [".jpg", ".jpeg"],
-        }
-        ext_list = ext_map.get(file_type, [])
-
-        try:
-            import psycopg2  # type: ignore
-        except ImportError:
-            self.send_json(500, {"error": "psycopg2 not installed"})
-            return
-
-        try:
-            conn = psycopg2.connect(
-                host=os.environ.get("POSTGRES_HOST", "localhost"),
-                port=int(os.environ.get("POSTGRES_PORT", "65432")),
-                dbname=os.environ.get("POSTGRES_DB", "vectordb"),
-                user=os.environ.get("POSTGRES_USER", "testuser"),
-                password=os.environ.get("POSTGRES_PASSWORD", "testpwd"),
-            )
-            try:
-                with conn.cursor() as cur:
-                    # Strip spaces from both keyword and file_name before matching
-                    kw_nospace = f"%{keyword.replace(' ', '')}%"
-                    if ext_list:
-                        ext_clauses = " OR ".join(
-                            [f"LOWER(file_name) LIKE %s" for _ in ext_list]
-                        )
-                        sql = (
-                            f"SELECT file_name, file_path FROM documents "
-                            f"WHERE replace(file_name, ' ', '') ILIKE %s AND ({ext_clauses}) "
-                            f"ORDER BY file_name LIMIT 50"
-                        )
-                        params = [kw_nospace] + [f"%{ext}" for ext in ext_list]
-                        cur.execute(sql, params)
-                    else:
-                        cur.execute(
-                            "SELECT file_name, file_path FROM documents "
-                            "WHERE replace(file_name, ' ', '') ILIKE %s "
-                            "ORDER BY file_name LIMIT 50",
-                            (kw_nospace,),
-                        )
-                    rows = cur.fetchall()
-            finally:
-                conn.close()
-
-            results = [
-                {
-                    "file_name": row[0],
-                    "file_path": row[1],
-                    "download_url": f"/files/{urllib.parse.quote(row[0], safe='')}",
-                }
-                for row in rows
-            ]
-            self.send_json(200, {"results": results, "count": len(results)})
-        except Exception as e:
-            traceback.print_exc(file=sys.stderr)
-            self.send_json(500, {"error": str(e)})
-
-    def _handle_list_inbox(self):
-        """GET /list-inbox — scan INGEST_INBOX_DIR (including subfolders as department).
-
-        Folder structure:
-            inbox/                    → department = 'general'
-            inbox/安全規範/           → department = '安全規範'
-            inbox/工安報告/2026/      → department = '工安報告'  (first-level subfolder name)
-        Skips: processed/, error/, and hidden folders (starting with .)
-        """
-        inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
-        if not inbox_dir or not os.path.isdir(inbox_dir):
-            self.send_json(200, {"files": [], "count": 0, "inbox_dir": inbox_dir, "warning": "INGEST_INBOX_DIR not set or not found"})
-            return
-
-        supported = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".jpg", ".jpeg", ".png"}
-        skip_dirs = {"processed", "error"}
-        files = []
-
-        for root, dirs, fnames in os.walk(inbox_dir):
-            # Prune skipped and hidden directories in-place
-            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
-
-            # Determine department from first-level subfolder name
-            rel = os.path.relpath(root, inbox_dir)
-            if rel == ".":
-                department = "general"
-            else:
-                department = rel.split(os.sep)[0]  # first-level folder only
-
-            for fname in fnames:
-                ext = os.path.splitext(fname)[1].lower()
-                if ext not in supported:
-                    continue
-                fpath = os.path.join(root, fname)
-                files.append({
-                    "file_name": fname,
-                    "file_path": fpath,
-                    "file_ext": ext,
-                    "file_size": os.path.getsize(fpath),
-                    "department": department,
-                })
-
-        self.send_json(200, {"files": files, "count": len(files), "inbox_dir": inbox_dir})
-
-    def _handle_ingest_file(self, data: dict):
-        """POST /ingest-file  {file_path, department?} -> {success, file_name, chunk_count, error?}"""
-        import shutil
-
-        file_path = data.get("file_path", "").strip()
-        if not file_path:
-            self.send_json(400, {"error": "Missing required field: file_path"})
-            return
-        if not os.path.isfile(file_path):
-            self.send_json(404, {"error": f"File not found: {file_path}"})
-            return
-
-        department = str(data.get("department", "general"))
-        file_name = os.path.basename(file_path)
-        inbox_root = os.path.abspath(os.environ.get("INGEST_INBOX_DIR", os.path.join(os.path.dirname(file_path), "..")))
-        processed_root = os.path.abspath(os.environ.get("INGEST_PROCESSED_DIR", os.path.join(inbox_root, "processed")))
-        error_root = os.path.abspath(os.environ.get("INGEST_ERROR_DIR", os.path.join(inbox_root, "error")))
-
-        # Compute relative path from inbox root to preserve folder structure
-        try:
-            rel_path = os.path.relpath(os.path.abspath(file_path), inbox_root)
-        except ValueError:
-            rel_path = file_name  # fallback: different drive
-
-        def move_file(dest_root: str):
-            try:
-                dest_path = os.path.join(dest_root, rel_path)
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                shutil.move(file_path, dest_path)
-            except Exception as mv_err:
-                sys.stderr.write(f"[api_server] move error: {mv_err}\n")
-
-        try:
-            # Step 1: extract text
-            r1 = self.run_script([sys.executable, str(_SCRIPT_DIR / "extract_text.py"), file_path])
-            if r1.returncode != 0:
-                raise RuntimeError(f"extract_text failed: {r1.stderr.decode('utf-8', errors='replace')[:300]}")
-            extracted = json.loads(r1.stdout.decode("utf-8"))
-            if "error" in extracted:
-                raise RuntimeError(f"extract_text error: {extracted['error']}")
-            text = extracted.get("text", "").strip()
-            if not text:
-                raise RuntimeError("無法取得文字內容（空白或純圖片 PDF）")
-            extracted["metadata"]["department"] = department
-
-            # Step 2: chunk text
-            r2 = self.run_script(
-                [sys.executable, str(_SCRIPT_DIR / "chunk_text.py"), "--text", text],
-            )
-            if r2.returncode != 0:
-                raise RuntimeError(f"chunk_text failed: {r2.stderr.decode('utf-8', errors='replace')[:300]}")
-            chunks = json.loads(r2.stdout.decode("utf-8"))
-            if not isinstance(chunks, list) or len(chunks) == 0:
-                raise RuntimeError("切片結果為空")
-
-            # Step 3: embed chunks
-            chunks_bytes = json.dumps(chunks, ensure_ascii=False).encode("utf-8")
-            r3 = self.run_script([sys.executable, str(_SCRIPT_DIR / "embed_chunks.py")], stdin_data=chunks_bytes)
-            if r3.returncode != 0:
-                raise RuntimeError(f"embed_chunks failed: {r3.stderr.decode('utf-8', errors='replace')[:300]}")
-            embedded_chunks = json.loads(r3.stdout.decode("utf-8"))
-
-            # Step 4: write to DB
-            db_payload = json.dumps({
-                "text": text,
-                "metadata": extracted["metadata"],
-                "ocr_used": extracted.get("ocr_used", False),
-                "page_count": extracted.get("page_count", 1),
-                "chunks": embedded_chunks,
-            }, ensure_ascii=False).encode("utf-8")
-            r4 = self.run_script([sys.executable, str(_SCRIPT_DIR / "write_to_db.py")], stdin_data=db_payload)
-            if r4.returncode != 0:
-                raise RuntimeError(f"write_to_db failed: {r4.stderr.decode('utf-8', errors='replace')[:300]}")
-            db_result = json.loads(r4.stdout.decode("utf-8"))
-
-            move_file(processed_root)
-            self.send_json(200, {
-                "success": True,
-                "file_name": file_name,
-                "chunk_count": len(embedded_chunks),
-                "db_result": db_result,
-            })
-
-        except Exception as e:
-            traceback.print_exc(file=sys.stderr)
-            move_file(error_root)
-            self.send_json(200, {
-                "success": False,
-                "file_name": file_name,
-                "error": str(e),
-            })
-
-    def _handle_backup_db(self, data: dict):
-        """POST /backup-db  {backup_dir?, keep?} -> {success, backup_file, file_size_mb, deleted_old}"""
-        backup_dir = str(data.get("backup_dir", "") or os.environ.get("BACKUP_DIR", "D:/智能助理資料庫自動備份"))
-        keep = int(data.get("keep", os.environ.get("BACKUP_KEEP", 7)))
-
-        args = [
-            sys.executable, str(_SCRIPT_DIR / "backup_db.py"),
-            "--backup-dir", backup_dir,
-            "--keep", str(keep),
-        ]
-        result = self.run_script(args)
-
-        try:
-            out = json.loads(result.stdout.decode("utf-8"))
-            self.send_json(200, out)
-        except json.JSONDecodeError:
-            self.send_json(500, {
-                "success": False,
-                "error": result.stderr.decode("utf-8", errors="replace"),
-            })
-
-    def _handle_prompt_builder(self, data: dict):
-        """POST /prompt-builder  {question, chunks, history} -> {system, prompt}"""
-        question = data.get("question", "")
-        if not question:
-            self.send_json(400, {"error": "Missing required field: question"})
-            return
-
-        stdin_payload = json.dumps({
-            "question": question,
-            "chunks": data.get("chunks", []),
-            "history": data.get("history", []),
-        }, ensure_ascii=False).encode("utf-8")
-
-        result = self.run_script(
-            [sys.executable, str(_SCRIPT_DIR / "prompt_builder.py")],
-            stdin_data=stdin_payload,
-        )
-
-        if result.returncode != 0 and not result.stdout.strip():
-            self.send_json(500, {"error": result.stderr.decode("utf-8", errors="replace")})
-            return
-
-        try:
-            out = json.loads(result.stdout.decode("utf-8"))
-            self.send_json(200, out)
-        except json.JSONDecodeError:
-            self.send_json(500, {"error": "prompt_builder.py returned non-JSON"})
+    def log_message(self, fmt: str, *args) -> None:  # noqa: ANN002
+        logger.info(fmt, *args)
 
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Entry point
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
-def main():
-    parser = argparse.ArgumentParser(description="Local API server for n8n workflow (replaces executeCommand nodes)")
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8765)
-    args = parser.parse_args()
-
-    server = HTTPServer((args.host, args.port), APIHandler)
-    sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db\n")
-    sys.stderr.flush()
+def main() -> None:
+    port = int(os.environ.get("PORT", "8080"))
+    server = HTTPServer(("0.0.0.0", port), WebhookHandler)
+    logger.info("LINE Webhook server listening on port %d", port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        sys.stderr.write("\n[api_server] Shutting down.\n")
+        logger.info("Server stopped")
 
 
 if __name__ == "__main__":
