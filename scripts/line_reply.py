@@ -6,6 +6,7 @@ line_reply.py — LINE Bot 回覆工具，自動處理 reply token 過期問題
   1. 嘗試使用 replyToken 呼叫 Reply API
   2. 若 reply token 過期（HTTP 400, property=replyToken），自動 fallback 到 Push API
   3. 從 stdin 讀取 JSON，輸出執行結果至 stdout
+  4. 提供 build_flex_image_message() 輔助函式，確保 Flex Message 圖片欄位完整
 
 stdin JSON 格式：
 {
@@ -94,27 +95,89 @@ def is_token_expired(response: dict) -> bool:
         return False
     body = response.get("body", {})
     details = body.get("details", [])
-    if any(d.get("property") == "replyToken" for d in details):
-        return True
-    # 部分版本直接在 message 欄位說明
-    message = body.get("message", "").lower()
-    return "replytoken" in message or "reply token" in message
+    return any(d.get("property") == "replyToken" for d in details)
 
 
-def reply_message(reply_token: str, messages: list, token: str) -> dict:
-    """呼叫 LINE Reply API"""
-    payload = {"replyToken": reply_token, "messages": messages}
-    return _post_json(LINE_REPLY_API, payload, token)
+def build_flex_image_message(
+    image_url: str,
+    alt_text: str = "圖片訊息",
+    aspect_ratio: str = "20:13",
+    aspect_mode: str = "cover",
+    size: str = "full",
+    body_contents: list | None = None,
+) -> dict:
+    """
+    建構包含圖片的 Flex Message。
+
+    LINE Flex Message 圖片必須提供以下欄位，否則會排版跑版或圖片空白：
+      - aspectRatio：圖片長寬比，例如 "20:13"、"1:1"、"3:4"
+      - aspectMode："cover"（裁切填滿）或 "fit"（完整顯示）
+      - size："full"、"5xl"、"4xl" 等，hero image 通常用 "full"
+
+    Args:
+        image_url:     圖片的 HTTPS URL
+        alt_text:      Flex Message 替代文字（通知欄顯示）
+        aspect_ratio:  圖片外框長寬比（預設 "20:13"）
+        aspect_mode:   填充模式，"cover" 或 "fit"（預設 "cover"）
+        size:          圖片尺寸關鍵字（預設 "full"）
+        body_contents: bubble body 的額外 contents 清單（可選）
+
+    Returns:
+        符合 LINE Messaging API 格式的 Flex Message dict
+    """
+    hero_block = {
+        "type": "image",
+        "url": image_url,
+        "size": size,
+        "aspectRatio": aspect_ratio,
+        "aspectMode": aspect_mode,
+    }
+
+    bubble: dict = {
+        "type": "bubble",
+        "hero": hero_block,
+    }
+
+    if body_contents:
+        bubble["body"] = {
+            "type": "box",
+            "layout": "vertical",
+            "contents": body_contents,
+        }
+
+    return {
+        "type": "flex",
+        "altText": alt_text,
+        "contents": bubble,
+    }
 
 
-def push_message(user_id: str, messages: list, token: str) -> dict:
-    """呼叫 LINE Push API（reply token 過期後的 fallback）"""
-    payload = {"to": user_id, "messages": messages}
-    return _post_json(LINE_PUSH_API, payload, token)
+def reply_or_push(reply_token: str, user_id: str, messages: list, token: str) -> dict:
+    """嘗試 Reply API，若 token 過期則 fallback 到 Push API"""
+    result = _post_json(
+        LINE_REPLY_API,
+        {"replyToken": reply_token, "messages": messages},
+        token,
+    )
+    if is_token_expired(result):
+        if not user_id:
+            return {"success": False, "error": "reply token expired and no user_id for push fallback", "reply_response": result}
+        push_result = _post_json(
+            LINE_PUSH_API,
+            {"to": user_id, "messages": messages},
+            token,
+        )
+        return {"success": not push_result.get("error", False), "method": "push", "response": push_result}
+    return {"success": not result.get("error", False), "method": "reply", "response": result}
 
 
 def main() -> None:
-    # 1. 從 stdin 讀取輸入
+    try:
+        token = get_access_token()
+    except ValueError as e:
+        print(json.dumps({"success": False, "error": str(e)}))
+        sys.exit(1)
+
     try:
         payload = json.loads(sys.stdin.read())
     except json.JSONDecodeError as e:
@@ -122,90 +185,19 @@ def main() -> None:
         sys.exit(1)
 
     reply_token = payload.get("reply_token", "")
-    user_id     = payload.get("user_id", "")
-    messages    = payload.get("messages", [])
+    user_id = payload.get("user_id", "")
+    messages = payload.get("messages", [])
+
+    if not reply_token and not user_id:
+        print(json.dumps({"success": False, "error": "reply_token or user_id required"}))
+        sys.exit(1)
 
     if not messages:
-        print(json.dumps({"success": False, "error": "No messages provided"}))
+        print(json.dumps({"success": False, "error": "messages array is empty"}))
         sys.exit(1)
 
-    # 2. 取得 access token
-    try:
-        access_token = get_access_token()
-    except ValueError as e:
-        print(json.dumps({"success": False, "error": str(e)}))
-        sys.exit(1)
-
-    # 3. 優先嘗試 Reply API（需要 reply_token）
-    if reply_token:
-        result = reply_message(reply_token, messages, access_token)
-
-        if result.get("status") == 200:
-            print(json.dumps({"success": True, "method": "reply", "status": 200}))
-            return
-
-        if is_token_expired(result):
-            # 記錄警告到 stderr，不中斷流程
-            print(
-                json.dumps({
-                    "warning": "reply token expired",
-                    "fallback": "push" if user_id else "none",
-                }),
-                file=sys.stderr,
-            )
-
-            # 4. Fallback：改用 Push API
-            if user_id:
-                push_result = push_message(user_id, messages, access_token)
-                if push_result.get("status") == 200:
-                    print(json.dumps({
-                        "success": True,
-                        "method": "push_fallback",
-                        "status": 200,
-                        "note": "reply token expired; delivered via push API",
-                    }))
-                    return
-                print(json.dumps({
-                    "success": False,
-                    "method": "push_fallback",
-                    "status": push_result.get("status"),
-                    "error": push_result.get("body"),
-                }))
-                sys.exit(1)
-
-            # 沒有 user_id，無法 fallback
-            print(json.dumps({
-                "success": False,
-                "method": "reply",
-                "error": "reply token expired and no user_id for push fallback",
-            }))
-            sys.exit(1)
-
-        # 其他 API 錯誤
-        print(json.dumps({
-            "success": False,
-            "method": "reply",
-            "status": result.get("status"),
-            "error": result.get("body"),
-        }))
-        sys.exit(1)
-
-    # 5. 無 reply_token，直接 Push（需要 user_id）
-    if not user_id:
-        print(json.dumps({"success": False, "error": "Neither reply_token nor user_id provided"}))
-        sys.exit(1)
-
-    push_result = push_message(user_id, messages, access_token)
-    if push_result.get("status") == 200:
-        print(json.dumps({"success": True, "method": "push", "status": 200}))
-    else:
-        print(json.dumps({
-            "success": False,
-            "method": "push",
-            "status": push_result.get("status"),
-            "error": push_result.get("body"),
-        }))
-        sys.exit(1)
+    result = reply_or_push(reply_token, user_id, messages, token)
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":
