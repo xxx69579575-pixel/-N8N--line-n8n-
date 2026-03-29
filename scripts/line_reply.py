@@ -11,7 +11,8 @@ stdin JSON 格式：
 {
   "reply_token": "<replyToken from webhook event>",
   "user_id": "<userId, optional, for push fallback>",
-  "messages": [{"type": "text", "text": "..."}]
+  "messages": [{"type": "text", "text": "..."}
+               {"type": "image", "originalContentUrl": "https://...", "previewImageUrl": "https://..."}]
 }
 
 環境變數（可從 config/.env 載入）：
@@ -28,6 +29,20 @@ from pathlib import Path
 
 LINE_REPLY_API = "https://api.line.me/v2/bot/message/reply"
 LINE_PUSH_API  = "https://api.line.me/v2/bot/message/push"
+
+# 各訊息類型的必要欄位定義
+_REQUIRED_FIELDS: dict[str, list[str]] = {
+    "text":     ["text"],
+    "image":    ["originalContentUrl", "previewImageUrl"],
+    "video":    ["originalContentUrl", "previewImageUrl"],
+    "audio":    ["originalContentUrl", "duration"],
+    "location": ["title", "address", "latitude", "longitude"],
+    "sticker":  ["packageId", "stickerId"],
+    "template": ["altText", "template"],
+    "flex":     ["altText", "contents"],
+}
+
+SUPPORTED_TYPES = set(_REQUIRED_FIELDS.keys())
 
 
 def load_env_file(env_path: str) -> None:
@@ -57,6 +72,42 @@ def get_access_token() -> str:
     if not token:
         raise ValueError("LINE_CHANNEL_ACCESS_TOKEN not set")
     return token
+
+
+def validate_messages(messages: list) -> str | None:
+    """
+    驗證訊息陣列格式。
+    回傳 None 表示合法；回傳字串表示錯誤描述。
+
+    LINE API 支援的訊息類型：text, image, video, audio,
+    location, sticker, template, flex。
+    圖片訊息必須包含 originalContentUrl 與 previewImageUrl。
+    """
+    if not isinstance(messages, list) or len(messages) == 0:
+        return "messages must be a non-empty list"
+
+    for i, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            return f"messages[{i}] must be an object"
+
+        msg_type = msg.get("type")
+        if not msg_type:
+            return f"messages[{i}] missing required field: type"
+
+        if msg_type not in SUPPORTED_TYPES:
+            return (
+                f"messages[{i}] unsupported message type: '{msg_type}'. "
+                f"Supported types: {sorted(SUPPORTED_TYPES)}"
+            )
+
+        required = _REQUIRED_FIELDS[msg_type]
+        for field in required:
+            if not msg.get(field):
+                return (
+                    f"messages[{i}] (type='{msg_type}') missing required field: '{field}'"
+                )
+
+    return None
 
 
 def _post_json(url: str, payload: dict, token: str) -> dict:
@@ -94,27 +145,23 @@ def is_token_expired(response: dict) -> bool:
         return False
     body = response.get("body", {})
     details = body.get("details", [])
-    if any(d.get("property") == "replyToken" for d in details):
-        return True
-    # 部分版本直接在 message 欄位說明
-    message = body.get("message", "").lower()
-    return "replytoken" in message or "reply token" in message
+    return any(d.get("property") == "replyToken" for d in details)
 
 
-def reply_message(reply_token: str, messages: list, token: str) -> dict:
+def reply(reply_token: str, messages: list, token: str) -> dict:
     """呼叫 LINE Reply API"""
     payload = {"replyToken": reply_token, "messages": messages}
     return _post_json(LINE_REPLY_API, payload, token)
 
 
-def push_message(user_id: str, messages: list, token: str) -> dict:
-    """呼叫 LINE Push API（reply token 過期後的 fallback）"""
+def push(user_id: str, messages: list, token: str) -> dict:
+    """呼叫 LINE Push API"""
     payload = {"to": user_id, "messages": messages}
     return _post_json(LINE_PUSH_API, payload, token)
 
 
 def main() -> None:
-    # 1. 從 stdin 讀取輸入
+    # 1. 讀取 stdin JSON
     try:
         payload = json.loads(sys.stdin.read())
     except json.JSONDecodeError as e:
@@ -125,86 +172,37 @@ def main() -> None:
     user_id     = payload.get("user_id", "")
     messages    = payload.get("messages", [])
 
-    if not messages:
-        print(json.dumps({"success": False, "error": "No messages provided"}))
+    # 2. 驗證訊息格式（含圖片等類型的必要欄位）
+    validation_error = validate_messages(messages)
+    if validation_error:
+        print(json.dumps({"success": False, "error": validation_error}))
         sys.exit(1)
 
-    # 2. 取得 access token
+    # 3. 取得 access token
     try:
-        access_token = get_access_token()
+        token = get_access_token()
     except ValueError as e:
         print(json.dumps({"success": False, "error": str(e)}))
         sys.exit(1)
 
-    # 3. 優先嘗試 Reply API（需要 reply_token）
-    if reply_token:
-        result = reply_message(reply_token, messages, access_token)
+    # 4. 嘗試 Reply API
+    result = reply(reply_token, messages, token)
 
-        if result.get("status") == 200:
-            print(json.dumps({"success": True, "method": "reply", "status": 200}))
-            return
-
-        if is_token_expired(result):
-            # 記錄警告到 stderr，不中斷流程
-            print(
-                json.dumps({
-                    "warning": "reply token expired",
-                    "fallback": "push" if user_id else "none",
-                }),
-                file=sys.stderr,
-            )
-
-            # 4. Fallback：改用 Push API
-            if user_id:
-                push_result = push_message(user_id, messages, access_token)
-                if push_result.get("status") == 200:
-                    print(json.dumps({
-                        "success": True,
-                        "method": "push_fallback",
-                        "status": 200,
-                        "note": "reply token expired; delivered via push API",
-                    }))
-                    return
-                print(json.dumps({
-                    "success": False,
-                    "method": "push_fallback",
-                    "status": push_result.get("status"),
-                    "error": push_result.get("body"),
-                }))
-                sys.exit(1)
-
-            # 沒有 user_id，無法 fallback
+    # 5. reply token 過期 → fallback 到 Push API
+    if is_token_expired(result):
+        if not user_id:
             print(json.dumps({
                 "success": False,
-                "method": "reply",
-                "error": "reply token expired and no user_id for push fallback",
+                "error": "replyToken expired and user_id not provided for push fallback",
+                "api_response": result,
             }))
             sys.exit(1)
+        result = push(user_id, messages, token)
+        result["fallback"] = "push"
 
-        # 其他 API 錯誤
-        print(json.dumps({
-            "success": False,
-            "method": "reply",
-            "status": result.get("status"),
-            "error": result.get("body"),
-        }))
-        sys.exit(1)
-
-    # 5. 無 reply_token，直接 Push（需要 user_id）
-    if not user_id:
-        print(json.dumps({"success": False, "error": "Neither reply_token nor user_id provided"}))
-        sys.exit(1)
-
-    push_result = push_message(user_id, messages, access_token)
-    if push_result.get("status") == 200:
-        print(json.dumps({"success": True, "method": "push", "status": 200}))
-    else:
-        print(json.dumps({
-            "success": False,
-            "method": "push",
-            "status": push_result.get("status"),
-            "error": push_result.get("body"),
-        }))
+    success = not result.get("error", False)
+    print(json.dumps({"success": success, **result}))
+    if not success:
         sys.exit(1)
 
 
