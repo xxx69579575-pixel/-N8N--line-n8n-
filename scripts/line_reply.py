@@ -94,27 +94,23 @@ def is_token_expired(response: dict) -> bool:
         return False
     body = response.get("body", {})
     details = body.get("details", [])
-    if any(d.get("property") == "replyToken" for d in details):
-        return True
-    # 部分版本直接在 message 欄位說明
-    message = body.get("message", "").lower()
-    return "replytoken" in message or "reply token" in message
+    return any(d.get("property") == "replyToken" for d in details)
 
 
-def reply_message(reply_token: str, messages: list, token: str) -> dict:
-    """呼叫 LINE Reply API"""
+def send_reply(access_token: str, reply_token: str, messages: list) -> dict:
+    """使用 Reply API 發送訊息"""
     payload = {"replyToken": reply_token, "messages": messages}
-    return _post_json(LINE_REPLY_API, payload, token)
+    return _post_json(LINE_REPLY_API, payload, access_token)
 
 
-def push_message(user_id: str, messages: list, token: str) -> dict:
-    """呼叫 LINE Push API（reply token 過期後的 fallback）"""
+def send_push(access_token: str, user_id: str, messages: list) -> dict:
+    """使用 Push API 發送訊息"""
     payload = {"to": user_id, "messages": messages}
-    return _post_json(LINE_PUSH_API, payload, token)
+    return _post_json(LINE_PUSH_API, payload, access_token)
 
 
 def main() -> None:
-    # 1. 從 stdin 讀取輸入
+    # 1. 讀取 stdin JSON
     try:
         payload = json.loads(sys.stdin.read())
     except json.JSONDecodeError as e:
@@ -122,88 +118,42 @@ def main() -> None:
         sys.exit(1)
 
     reply_token = payload.get("reply_token", "")
-    user_id     = payload.get("user_id", "")
-    messages    = payload.get("messages", [])
+    user_id = payload.get("user_id", "")
+    messages = payload.get("messages", [])
 
     if not messages:
-        print(json.dumps({"success": False, "error": "No messages provided"}))
+        print(json.dumps({"success": False, "error": "Missing messages field"}))
         sys.exit(1)
 
-    # 2. 取得 access token
+    # 2. 取得 Access Token
     try:
         access_token = get_access_token()
     except ValueError as e:
         print(json.dumps({"success": False, "error": str(e)}))
         sys.exit(1)
 
-    # 3. 優先嘗試 Reply API（需要 reply_token）
+    # 3. 嘗試 Reply API
     if reply_token:
-        result = reply_message(reply_token, messages, access_token)
-
-        if result.get("status") == 200:
-            print(json.dumps({"success": True, "method": "reply", "status": 200}))
+        result = send_reply(access_token, reply_token, messages)
+        if not result.get("error"):
+            print(json.dumps({"success": True, "method": "reply", "response": result}))
             return
-
-        if is_token_expired(result):
-            # 記錄警告到 stderr，不中斷流程
-            print(
-                json.dumps({
-                    "warning": "reply token expired",
-                    "fallback": "push" if user_id else "none",
-                }),
-                file=sys.stderr,
-            )
-
-            # 4. Fallback：改用 Push API
-            if user_id:
-                push_result = push_message(user_id, messages, access_token)
-                if push_result.get("status") == 200:
-                    print(json.dumps({
-                        "success": True,
-                        "method": "push_fallback",
-                        "status": 200,
-                        "note": "reply token expired; delivered via push API",
-                    }))
-                    return
-                print(json.dumps({
-                    "success": False,
-                    "method": "push_fallback",
-                    "status": push_result.get("status"),
-                    "error": push_result.get("body"),
-                }))
-                sys.exit(1)
-
-            # 沒有 user_id，無法 fallback
-            print(json.dumps({
-                "success": False,
-                "method": "reply",
-                "error": "reply token expired and no user_id for push fallback",
-            }))
+        if not is_token_expired(result):
+            # 非 token 過期的其他錯誤，直接回傳失敗
+            print(json.dumps({"success": False, "method": "reply", "response": result}))
             sys.exit(1)
 
-        # 其他 API 錯誤
-        print(json.dumps({
-            "success": False,
-            "method": "reply",
-            "status": result.get("status"),
-            "error": result.get("body"),
-        }))
-        sys.exit(1)
-
-    # 5. 無 reply_token，直接 Push（需要 user_id）
-    if not user_id:
-        print(json.dumps({"success": False, "error": "Neither reply_token nor user_id provided"}))
-        sys.exit(1)
-
-    push_result = push_message(user_id, messages, access_token)
-    if push_result.get("status") == 200:
-        print(json.dumps({"success": True, "method": "push", "status": 200}))
+    # 4. Fallback 到 Push API
+    if user_id:
+        result = send_push(access_token, user_id, messages)
+        success = not result.get("error")
+        print(json.dumps({"success": success, "method": "push", "response": result}))
+        if not success:
+            sys.exit(1)
     else:
         print(json.dumps({
             "success": False,
-            "method": "push",
-            "status": push_result.get("status"),
-            "error": push_result.get("body"),
+            "error": "reply_token expired and user_id not provided for push fallback"
         }))
         sys.exit(1)
 
