@@ -78,111 +78,114 @@ def get_embedding(text: str) -> list:
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode("utf-8"))
+            embeddings = result.get("embeddings")
+            if embeddings and isinstance(embeddings, list):
+                return embeddings[0]
+            # fallback for older Ollama /api/embed response shape
+            embedding = result.get("embedding")
+            if embedding:
+                return embedding
+            raise ValueError(f"Unexpected Ollama response shape: {list(result.keys())}")
     except urllib.error.URLError as e:
-        print(f"ERROR: Cannot reach Ollama at {url}: {e}", file=sys.stderr)
+        print(f"ERROR: Cannot reach Ollama at {OLLAMA_BASE_URL} — {e}", file=sys.stderr)
         sys.exit(1)
-
-    embeddings = result.get("embeddings")
-    if not embeddings or not embeddings[0]:
-        print(f"ERROR: Unexpected Ollama response: {result}", file=sys.stderr)
-        sys.exit(1)
-    return embeddings[0]
 
 
 # ---------------------------------------------------------------------------
-# pgvector search (pure-stdlib socket-based psycopg2 alternative)
+# pgvector search
 # ---------------------------------------------------------------------------
 
-def vector_search(embedding: list, top_k: int, min_sim: float, department: str, file_name: str = "") -> list:
+def search(question: str, top_k: int = 5, min_sim: float = 0.5, department: str | None = None) -> list:
     try:
         import psycopg2
-        import psycopg2.extras
     except ImportError:
-        print("ERROR: psycopg2 is required. Install with: pip install psycopg2-binary", file=sys.stderr)
+        print("ERROR: psycopg2 is required. pip install psycopg2-binary", file=sys.stderr)
         sys.exit(1)
 
-    vec_literal = "[" + ",".join(str(v) for v in embedding) + "]"
+    embedding = get_embedding(question)
+    vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
-    sql = f"""
-SELECT
-    dc.id        AS chunk_id,
-    dc.chunk_text,
-    d.file_name,
-    1 - (dc.embedding <=> %s::vector) AS similarity
-FROM document_chunks dc
-JOIN documents d ON dc.document_id = d.id
-JOIN document_permissions dp ON dc.document_id = dp.document_id
-WHERE 1 - (dc.embedding <=> %s::vector) >= %s
-  AND (%s = '' OR dp.department = %s)
-  AND (%s = '' OR d.file_name = %s)
-ORDER BY dc.embedding <=> %s::vector
-LIMIT %s;
-"""
+    conn = psycopg2.connect(
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        dbname=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+    )
 
     try:
-        conn = psycopg2.connect(
-            host=POSTGRES_HOST,
-            port=POSTGRES_PORT,
-            dbname=POSTGRES_DB,
-            user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD,
-        )
-    except Exception as e:
-        print(f"ERROR: Cannot connect to PostgreSQL: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SET ivfflat.probes = 50")
-            cur.execute(sql, (
-                vec_literal, vec_literal, min_sim,
-                department, department,
-                file_name, file_name,
-                vec_literal, top_k,
-            ))
+        with conn.cursor() as cur:
+            if department:
+                cur.execute(
+                    """
+                    SELECT
+                        dc.chunk_index,
+                        dc.chunk_text,
+                        d.file_name,
+                        d.file_path,
+                        1 - (dc.embedding <=> %s::vector) AS similarity
+                    FROM document_chunks dc
+                    JOIN documents d ON d.id = dc.document_id
+                    WHERE d.department = %s
+                      AND 1 - (dc.embedding <=> %s::vector) >= %s
+                    ORDER BY dc.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (vec_str, department, vec_str, min_sim, vec_str, top_k),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT
+                        dc.chunk_index,
+                        dc.chunk_text,
+                        d.file_name,
+                        d.file_path,
+                        1 - (dc.embedding <=> %s::vector) AS similarity
+                    FROM document_chunks dc
+                    JOIN documents d ON d.id = dc.document_id
+                    WHERE 1 - (dc.embedding <=> %s::vector) >= %s
+                    ORDER BY dc.embedding <=> %s::vector
+                    LIMIT %s
+                    """,
+                    (vec_str, vec_str, min_sim, vec_str, top_k),
+                )
             rows = cur.fetchall()
-    except Exception as e:
-        print(f"ERROR: Query failed: {e}", file=sys.stderr)
-        conn.close()
-        sys.exit(1)
     finally:
         conn.close()
 
-    results = []
-    for row in rows:
-        results.append({
-            "chunk_id": str(row["chunk_id"]),
-            "chunk_text": row["chunk_text"],
-            "file_name": row["file_name"],
-            "similarity": float(row["similarity"]),
-        })
+    results = [
+        {
+            "chunk_index": row[0],
+            "chunk_text": row[1],
+            "file_name": row[2],
+            "file_path": row[3],
+            "similarity": float(row[4]),
+        }
+        for row in rows
+    ]
     return results
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI entry point
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="pgvector similarity search via Ollama embedding")
-    parser.add_argument("--question", required=True, help="Question text to embed and search")
-    parser.add_argument("--top-k", type=int, default=5, dest="top_k", help="Number of results (default: 5)")
-    parser.add_argument("--min-sim", type=float, default=0.7, dest="min_sim", help="Minimum similarity threshold (default: 0.7)")
-    parser.add_argument("--department", default="", help="Filter by department (optional)")
-    parser.add_argument("--file-name", default="", dest="file_name", help="Filter by exact file name (optional)")
+    parser = argparse.ArgumentParser(description="Vector similarity search")
+    parser.add_argument("--question", required=True, help="查詢問題")
+    parser.add_argument("--top-k", type=int, default=5, help="回傳前 N 筆結果 (default: 5)")
+    parser.add_argument("--min-sim", type=float, default=0.5, help="最低相似度門檻 (default: 0.5)")
+    parser.add_argument("--department", default=None, help="限定部門篩選")
     args = parser.parse_args()
 
-    print(f"Embedding question with model '{OLLAMA_EMBED_MODEL}'…", file=sys.stderr)
-    embedding = get_embedding(args.question)
-    print(f"Embedding dimension: {len(embedding)}", file=sys.stderr)
-
-    print(f"Searching top_k={args.top_k} min_sim={args.min_sim} department='{args.department}' file_name='{args.file_name}'…", file=sys.stderr)
-    results = vector_search(embedding, args.top_k, args.min_sim, args.department, args.file_name)
-
-    print(f"Found {len(results)} result(s).", file=sys.stderr)
-    output = json.dumps(results, ensure_ascii=False, indent=2)
-    sys.stdout.buffer.write(output.encode("utf-8"))
-    sys.stdout.buffer.write(b"\n")
+    results = search(
+        question=args.question,
+        top_k=args.top_k,
+        min_sim=args.min_sim,
+        department=args.department,
+    )
+    print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
