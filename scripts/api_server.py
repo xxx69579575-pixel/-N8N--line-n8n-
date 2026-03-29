@@ -87,166 +87,161 @@ def _line_api_request(url: str, payload: dict) -> dict:
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read().decode("utf-8")) if resp.read() else {}
+        # FIX: read body once into a variable to avoid consuming the stream twice
+        body = resp.read()
+        return json.loads(body.decode("utf-8")) if body else {}
 
 
 def reply_message(reply_token: str, messages: list) -> bool:
     """
     使用 reply token 回覆訊息。
-    回傳 True 表示成功，False 表示失敗（token 過期或其他錯誤）。
+    回傳 True 表示成功，False 表示失敗（token 過期或網路錯誤）。
     """
+    if not reply_token or not messages:
+        return False
+    payload = {
+        "replyToken": reply_token,
+        "messages": messages,
+    }
     try:
-        _line_api_request(LINE_REPLY_URL, {
-            "replyToken": reply_token,
-            "messages": messages,
-        })
+        _line_api_request(LINE_REPLY_URL, payload)
+        logger.info("reply_message: success (token=%s...)", reply_token[:8])
         return True
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        logger.warning("reply_message failed (HTTP %s): %s", e.code, body)
-        # 400 通常表示 token 過期或已使用
+        logger.warning("reply_message: HTTP %s — %s", e.code, body)
         return False
-    except Exception as e:
-        logger.warning("reply_message failed: %s", e)
+    except Exception as exc:
+        logger.warning("reply_message: failed — %s", exc)
         return False
 
 
 def push_message(user_id: str, messages: list) -> bool:
     """
-    使用 push API 傳送訊息（不需要 reply token）。
-    用於 reply token 過期後的 fallback。
+    使用 push API 主動傳送訊息（不需要 reply token）。
+    用於 reply token 過期時的 fallback。
     """
+    if not user_id or not messages:
+        return False
+    payload = {
+        "to": user_id,
+        "messages": messages,
+    }
     try:
-        _line_api_request(LINE_PUSH_URL, {
-            "to": user_id,
-            "messages": messages,
-        })
-        logger.info("push_message sent to %s", user_id)
+        _line_api_request(LINE_PUSH_URL, payload)
+        logger.info("push_message: success (user=%s)", user_id)
         return True
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
-        logger.error("push_message failed (HTTP %s): %s", e.code, body)
+        logger.error("push_message: HTTP %s — %s", e.code, body)
         return False
-    except Exception as e:
-        logger.error("push_message failed: %s", e)
+    except Exception as exc:
+        logger.error("push_message: failed — %s", exc)
         return False
 
 
-def send_message_with_fallback(
-    reply_token: str,
-    user_id: str,
-    messages: list,
-) -> None:
-    """
-    先嘗試 reply API；若失敗（token 過期）自動 fallback 至 push API。
-
-    Args:
-        reply_token: 來自 webhook 事件的 replyToken
-        user_id    : 事件的 source.userId，用於 push fallback
-        messages   : LINE message objects 陣列
-    """
-    if not reply_message(reply_token, messages):
-        logger.info(
-            "reply token expired or invalid for user %s, falling back to push",
-            user_id,
-        )
-        push_message(user_id, messages)
+def reply_or_push(reply_token: str, user_id: str, messages: list) -> bool:
+    """先嘗試 reply；若失敗則 fallback 至 push。"""
+    if reply_message(reply_token, messages):
+        return True
+    logger.info("reply failed, falling back to push for user=%s", user_id)
+    return push_message(user_id, messages)
 
 
 # ---------------------------------------------------------------------------
-# 事件處理（在背景執行緒中執行）
+# Event processing (runs in background thread)
 # ---------------------------------------------------------------------------
 
-def handle_message_event(event: dict) -> None:
-    """處理 message 類型事件，回覆相同文字（echo bot 示例）。"""
-    reply_token = event.get("replyToken", "")
-    source = event.get("source", {})
-    user_id = source.get("userId", "")
-    message = event.get("message", {})
-    text = message.get("text", "")
-
-    if not reply_token or not user_id:
-        logger.warning("Missing replyToken or userId in event: %s", event)
+def _process_event(event: dict) -> None:
+    """處理單一 LINE 事件（於背景執行緒中執行）。"""
+    event_type = event.get("type")
+    if event_type != "message":
         return
 
-    # 在此加入實際業務邏輯（例如 RAG 查詢、AI 回覆等）
-    # 因為已在背景執行緒中，可安全進行耗時操作
-    response_text = f"您說：{text}" if text else "（非文字訊息）"
+    message = event.get("message", {})
+    if message.get("type") != "text":
+        return
 
-    send_message_with_fallback(
-        reply_token=reply_token,
-        user_id=user_id,
-        messages=[{"type": "text", "text": response_text}],
-    )
+    text = message.get("text", "").strip()
+    reply_token = event.get("replyToken", "")
+    user_id = event.get("source", {}).get("userId", "")
+
+    logger.info("Received message: %r from user=%s", text, user_id)
+
+    response_messages = [
+        {"type": "text", "text": f"已收到您的訊息：{text}"}
+    ]
+    reply_or_push(reply_token, user_id, response_messages)
 
 
-def process_events(events: list) -> None:
-    """在背景執行緒中逐一處理所有事件。"""
+def _handle_events_async(events: list) -> None:
+    """在背景執行緒中處理所有事件，避免阻塞主執行緒（防止 LINE retry）。"""
     for event in events:
-        event_type = event.get("type", "")
         try:
-            if event_type == "message":
-                handle_message_event(event)
-            else:
-                logger.info("Unhandled event type: %s", event_type)
-        except Exception as e:
-            logger.exception("Error processing event %s: %s", event_type, e)
+            _process_event(event)
+        except Exception as exc:
+            logger.error("Error processing event %s: %s", event.get("type"), exc)
 
 
 # ---------------------------------------------------------------------------
-# HTTP Server
+# HTTP Request Handler
 # ---------------------------------------------------------------------------
 
 class WebhookHandler(BaseHTTPRequestHandler):
-    """LINE Webhook HTTP handler。"""
+    """接收 LINE Webhook POST 請求的 HTTP Handler。"""
 
-    def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/webhook":
-            self._respond(404, b"Not Found")
-            return
+    def log_message(self, fmt, *args):  # suppress default access log spam
+        logger.debug("HTTP %s", fmt % args)
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
+    def do_GET(self):
+        """健康檢查端點，讓 n8n HTTP Request 節點可確認服務存活。"""
+        if self.path in ("/", "/health"):
+            self._respond(200, {"status": "ok"})
+        else:
+            self._respond(404, {"error": "not found"})
 
-        # 1. 驗證簽章
-        signature = self.headers.get("X-Line-Signature", "")
-        if not verify_signature(body, signature):
-            logger.warning("Invalid signature — request rejected")
-            self._respond(400, b"Invalid signature")
-            return
-
-        # 2. 立即回傳 200 OK（必須在 30 秒內，否則 LINE 平台視為失敗並 retry）
-        self._respond(200, b"OK")
-
-        # 3. 解析事件並在背景執行緒中處理（不阻塞 HTTP response）
+    def do_POST(self):
+        """接收並驗證 LINE Webhook，立即回傳 200，背景處理事件。"""
         try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+
+            # 驗證簽章
+            signature = self.headers.get("X-Line-Signature", "")
+            if not verify_signature(body, signature):
+                logger.warning("Invalid signature from %s", self.client_address)
+                self._respond(400, {"error": "invalid signature"})
+                return
+
+            # 立即回傳 200 OK（防止 LINE 因逾時而 retry）
+            self._respond(200, {"status": "ok"})
+
+            # 背景執行緒處理事件
             payload = json.loads(body.decode("utf-8"))
             events = payload.get("events", [])
             if events:
                 t = threading.Thread(
-                    target=process_events,
+                    target=_handle_events_async,
                     args=(events,),
                     daemon=True,
                 )
                 t.start()
-        except json.JSONDecodeError as e:
-            logger.error("Failed to parse webhook body: %s", e)
 
-    def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
-            self._respond(200, b"OK")
-        else:
-            self._respond(404, b"Not Found")
+        except json.JSONDecodeError as exc:
+            logger.error("JSON decode error: %s", exc)
+            self._respond(400, {"error": "invalid JSON"})
+        except Exception as exc:
+            logger.exception("Unexpected error in do_POST: %s", exc)
+            # 仍回傳 200 避免 LINE retry；錯誤已記錄
+            self._respond(200, {"status": "error", "detail": str(exc)})
 
-    def _respond(self, status: int, body: bytes) -> None:
+    def _respond(self, status: int, body: dict) -> None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, fmt: str, *args) -> None:  # noqa: ANN002
-        logger.info(fmt, *args)
+        self.wfile.write(data)
 
 
 # ---------------------------------------------------------------------------
@@ -254,9 +249,16 @@ class WebhookHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    port = int(os.environ.get("PORT", "8080"))
-    server = HTTPServer(("0.0.0.0", port), WebhookHandler)
-    logger.info("LINE Webhook server listening on port %d", port)
+    host = os.environ.get("WEBHOOK_HOST", "0.0.0.0")
+    port = int(os.environ.get("WEBHOOK_PORT", "8080"))
+
+    if not LINE_CHANNEL_SECRET:
+        logger.warning("LINE_CHANNEL_SECRET is not set — signature verification will fail")
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        logger.warning("LINE_CHANNEL_ACCESS_TOKEN is not set — messaging will fail")
+
+    server = HTTPServer((host, port), WebhookHandler)
+    logger.info("Webhook server listening on %s:%d", host, port)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
