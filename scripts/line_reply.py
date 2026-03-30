@@ -98,16 +98,45 @@ def is_token_expired(response: dict) -> bool:
     return any(d.get("property") == "replyToken" for d in details)
 
 
-def send_reply(reply_token: str, messages: list, token: str) -> dict:
-    """使用 Reply API 發送訊息"""
+def send_reply(reply_token: str, user_id: str, messages: list, token: str) -> dict:
+    """嘗試 Reply API；若 token 過期則 fallback 到 Push API"""
     payload = {"replyToken": reply_token, "messages": messages}
-    return _post_json(LINE_REPLY_API, payload, token)
+    response = _post_json(LINE_REPLY_API, payload, token)
 
+    if response.get("status") == 200:
+        return {"success": True, "method": "reply", "status": 200}
 
-def send_push(user_id: str, messages: list, token: str) -> dict:
-    """使用 Push API 發送訊息（fallback）"""
-    payload = {"to": user_id, "messages": messages}
-    return _post_json(LINE_PUSH_API, payload, token)
+    if response.get("status") == 401:
+        return {
+            "success": False,
+            "error": "LINE_CHANNEL_ACCESS_TOKEN is invalid (HTTP 401)",
+            "status": 401,
+        }
+
+    if is_token_expired(response):
+        if not user_id:
+            return {
+                "success": False,
+                "method": "reply",
+                "error": "replyToken expired and no userId for push fallback",
+            }
+        push_payload = {"to": user_id, "messages": messages}
+        push_response = _post_json(LINE_PUSH_API, push_payload, token)
+        if push_response.get("status") == 200:
+            return {"success": True, "method": "push", "status": 200}
+        return {
+            "success": False,
+            "method": "push",
+            "status": push_response.get("status"),
+            "body": push_response.get("body"),
+        }
+
+    return {
+        "success": False,
+        "method": "reply",
+        "status": response.get("status"),
+        "body": response.get("body"),
+    }
 
 
 def main() -> None:
@@ -127,76 +156,16 @@ def main() -> None:
     user_id = payload.get("user_id", "")
     messages = payload.get("messages", [])
 
+    if not reply_token:
+        print(json.dumps({"success": False, "error": "Missing reply_token"}))
+        sys.exit(1)
+
     if not messages:
-        print(json.dumps({"success": False, "error": "messages field is empty or missing"}))
+        print(json.dumps({"success": False, "error": "Missing messages"}))
         sys.exit(1)
 
-    # 1. 嘗試 Reply API
-    if reply_token:
-        resp = send_reply(reply_token, messages, token)
-
-        if resp.get("status") == 200:
-            print(json.dumps({"success": True, "method": "reply", "status": 200}))
-            return
-
-        # 2. Channel Access Token 無效（401）
-        if resp.get("status") == 401:
-            print(json.dumps({
-                "success": False,
-                "error": "LINE_CHANNEL_ACCESS_TOKEN is invalid or expired",
-                "status": 401,
-            }))
-            sys.exit(1)
-
-        # 3. Reply token 過期 → fallback Push API
-        if is_token_expired(resp):
-            if not user_id:
-                print(json.dumps({
-                    "success": False,
-                    "error": "replyToken expired and user_id not provided for push fallback",
-                    "status": resp.get("status"),
-                }))
-                sys.exit(1)
-
-            push_resp = send_push(user_id, messages, token)
-            if push_resp.get("status") == 200:
-                print(json.dumps({"success": True, "method": "push_fallback", "status": 200}))
-                return
-            else:
-                print(json.dumps({
-                    "success": False,
-                    "error": "Both reply and push failed",
-                    "reply_status": resp.get("status"),
-                    "push_status": push_resp.get("status"),
-                    "push_body": push_resp.get("body"),
-                }))
-                sys.exit(1)
-
-        # 4. 其他錯誤
-        print(json.dumps({
-            "success": False,
-            "error": "Reply API failed",
-            "status": resp.get("status"),
-            "body": resp.get("body"),
-        }))
-        sys.exit(1)
-
-    # 5. 無 reply_token，直接用 Push API
-    if not user_id:
-        print(json.dumps({"success": False, "error": "Neither reply_token nor user_id provided"}))
-        sys.exit(1)
-
-    push_resp = send_push(user_id, messages, token)
-    if push_resp.get("status") == 200:
-        print(json.dumps({"success": True, "method": "push", "status": 200}))
-    else:
-        print(json.dumps({
-            "success": False,
-            "error": "Push API failed",
-            "status": push_resp.get("status"),
-            "body": push_resp.get("body"),
-        }))
-        sys.exit(1)
+    result = send_reply(reply_token, user_id, messages, token)
+    print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":
