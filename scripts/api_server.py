@@ -337,11 +337,12 @@ class APIHandler(BaseHTTPRequestHandler):
             finally:
                 conn.close()
 
+            _base_url = os.environ.get("API_SERVER_BASE_URL", "").rstrip("/")
             results = [
                 {
                     "file_name": row[0],
                     "file_path": row[1],
-                    "download_url": f"/files/{urllib.parse.quote(row[0], safe='')}",
+                    "download_url": f"{_base_url}/files/{urllib.parse.quote(row[0], safe='')}",
                 }
                 for row in rows
             ]
