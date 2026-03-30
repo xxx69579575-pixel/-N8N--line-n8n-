@@ -4,7 +4,8 @@ vector_search.py — pgvector cosine similarity search for QA.
 
 Usage:
     python scripts/vector_search.py --question "公司請假流程"
-    python scripts/vector_search.py --question "..." --top-k 3 --min-sim 0.6 --department HR
+    python scripts/vector_search.py --question "..." --top-k 3 --min-sim 0.3 --department HR
+    python scripts/vector_search.py --question "面積" --file "面積計算式.pdf" --min-sim 0.2
 
 Embeds the question via Ollama, queries document_chunks with pgvector cosine
 similarity, and prints a JSON array of results.
@@ -66,9 +67,12 @@ POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "testpwd")
 # ---------------------------------------------------------------------------
 
 def get_embedding(text: str) -> list:
-    # Use /api/embed (new API) with "input" key — must match how embed_chunks.py stores vectors
+    """Call Ollama /api/embed and return the embedding vector."""
     url = f"{OLLAMA_BASE_URL}/api/embed"
-    payload = json.dumps({"model": OLLAMA_EMBED_MODEL, "input": text}, ensure_ascii=False).encode("utf-8")
+    payload = json.dumps(
+        {"model": OLLAMA_EMBED_MODEL, "input": text},
+        ensure_ascii=False,
+    ).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
@@ -78,32 +82,40 @@ def get_embedding(text: str) -> list:
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             result = json.loads(resp.read().decode("utf-8"))
-            embeddings = result.get("embeddings")
-            if embeddings and isinstance(embeddings, list):
+            # /api/embed returns {"embeddings": [[...]]}
+            embeddings = result.get("embeddings") or result.get("embedding")
+            if not embeddings:
+                print(f"ERROR: Ollama response missing embeddings key: {list(result.keys())}", file=sys.stderr)
+                sys.exit(1)
+            # embeddings may be [[...]] or [...]
+            if isinstance(embeddings[0], list):
                 return embeddings[0]
-            # fallback for older Ollama /api/embed response shape
-            embedding = result.get("embedding")
-            if embedding:
-                return embedding
-            raise ValueError(f"Unexpected Ollama response shape: {list(result.keys())}")
+            return embeddings
     except urllib.error.URLError as e:
-        print(f"ERROR: Cannot reach Ollama at {OLLAMA_BASE_URL} — {e}", file=sys.stderr)
+        print(f"ERROR: Cannot reach Ollama at {OLLAMA_BASE_URL}: {e}", file=sys.stderr)
         sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
-# pgvector search
+# Vector search
 # ---------------------------------------------------------------------------
 
-def search(question: str, top_k: int = 5, min_sim: float = 0.5, department: str | None = None) -> list:
+def vector_search(
+    question: str,
+    top_k: int = 5,
+    min_sim: float = 0.25,
+    department: str | None = None,
+    file_name: str | None = None,
+) -> list[dict]:
+    """Return top_k chunks most similar to question."""
+    embedding = get_embedding(question)
+    embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+
     try:
         import psycopg2
     except ImportError:
         print("ERROR: psycopg2 is required. pip install psycopg2-binary", file=sys.stderr)
         sys.exit(1)
-
-    embedding = get_embedding(question)
-    vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
     conn = psycopg2.connect(
         host=POSTGRES_HOST,
@@ -115,77 +127,101 @@ def search(question: str, top_k: int = 5, min_sim: float = 0.5, department: str 
 
     try:
         with conn.cursor() as cur:
+            # Build dynamic WHERE clause
+            conditions = ["1 - (dc.embedding <=> %s::vector) >= %s"]
+            params: list = [embedding_str, min_sim]
+
             if department:
-                cur.execute(
-                    """
-                    SELECT
-                        dc.chunk_index,
-                        dc.chunk_text,
-                        d.file_name,
-                        d.file_path,
-                        1 - (dc.embedding <=> %s::vector) AS similarity
-                    FROM document_chunks dc
-                    JOIN documents d ON d.id = dc.document_id
-                    WHERE d.department = %s
-                      AND 1 - (dc.embedding <=> %s::vector) >= %s
-                    ORDER BY dc.embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (vec_str, department, vec_str, min_sim, vec_str, top_k),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT
-                        dc.chunk_index,
-                        dc.chunk_text,
-                        d.file_name,
-                        d.file_path,
-                        1 - (dc.embedding <=> %s::vector) AS similarity
-                    FROM document_chunks dc
-                    JOIN documents d ON d.id = dc.document_id
-                    WHERE 1 - (dc.embedding <=> %s::vector) >= %s
-                    ORDER BY dc.embedding <=> %s::vector
-                    LIMIT %s
-                    """,
-                    (vec_str, vec_str, min_sim, vec_str, top_k),
-                )
+                conditions.append("d.department = %s")
+                params.append(department)
+
+            if file_name:
+                # Support partial match so user can pass just the filename
+                conditions.append("d.file_name ILIKE %s")
+                params.append(f"%{file_name}%")
+
+            where_clause = " AND ".join(conditions)
+
+            query = f"""
+                SELECT
+                    dc.chunk_index,
+                    dc.chunk_text,
+                    1 - (dc.embedding <=> %s::vector) AS similarity,
+                    d.file_name,
+                    d.file_path,
+                    d.id AS document_id
+                FROM document_chunks dc
+                JOIN documents d ON dc.document_id = d.id
+                WHERE {where_clause}
+                ORDER BY dc.embedding <=> %s::vector
+                LIMIT %s
+            """
+            # embedding_str used twice: once for similarity calc, once for ORDER BY
+            cur.execute(query, [embedding_str] + params + [embedding_str, top_k])
             rows = cur.fetchall()
+
+            results = []
+            for chunk_index, chunk_text, similarity, fname, fpath, doc_id in rows:
+                results.append({
+                    "document_id": str(doc_id),
+                    "file_name": fname,
+                    "file_path": fpath,
+                    "chunk_index": chunk_index,
+                    "similarity": round(float(similarity), 4),
+                    "chunk_text": chunk_text,
+                })
+            return results
     finally:
         conn.close()
 
-    results = [
-        {
-            "chunk_index": row[0],
-            "chunk_text": row[1],
-            "file_name": row[2],
-            "file_path": row[3],
-            "similarity": float(row[4]),
-        }
-        for row in rows
-    ]
-    return results
-
 
 # ---------------------------------------------------------------------------
-# CLI entry point
+# CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description="Vector similarity search")
-    parser.add_argument("--question", required=True, help="查詢問題")
-    parser.add_argument("--top-k", type=int, default=5, help="回傳前 N 筆結果 (default: 5)")
-    parser.add_argument("--min-sim", type=float, default=0.5, help="最低相似度門檻 (default: 0.5)")
-    parser.add_argument("--department", default=None, help="限定部門篩選")
+    parser.add_argument("--question", required=True, help="搜尋問題")
+    parser.add_argument("--top-k", type=int, default=5, help="回傳筆數 (default: 5)")
+    parser.add_argument(
+        "--min-sim",
+        type=float,
+        default=0.25,
+        help="最低相似度門檻，0~1 (default: 0.25)。面積計算式 PDF 可嘗試 0.15",
+    )
+    parser.add_argument("--department", default=None, help="部門篩選")
+    parser.add_argument(
+        "--file",
+        default=None,
+        help="依檔名篩選，支援部分比對，例如 --file 面積計算式.pdf",
+    )
     args = parser.parse_args()
 
-    results = search(
+    results = vector_search(
         question=args.question,
         top_k=args.top_k,
         min_sim=args.min_sim,
         department=args.department,
+        file_name=args.file,
     )
-    print(json.dumps(results, ensure_ascii=False, indent=2))
+
+    if not results:
+        print(
+            json.dumps(
+                {
+                    "message": "找不到符合條件的結果",
+                    "hint": (
+                        f"請確認：1) 檔案已透過 batch_ingest.py 匯入；"
+                        f"2) 嘗試降低 --min-sim（目前 {args.min_sim}）；"
+                        f"3) 若 PDF 為掃描圖片，請確認 OCR 已啟用"
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
