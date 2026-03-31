@@ -29,6 +29,7 @@ import os
 import argparse
 import subprocess
 import traceback
+import mimetypes
 import urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
