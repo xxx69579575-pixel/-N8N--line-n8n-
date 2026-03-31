@@ -181,8 +181,8 @@
       ],
       "parameters": {
         "mode": "expression",
-        "output": "={{ $json.intent === 'file_search_execute' ? 1 : ($json.intent === 'file_search_menu' || $json.intent === 'ask_about_file') ? 2 : $json.intent === 'file_type_selected' ? 3 : 0 }}",
-        "outputsAmount": 4,
+        "output": "={{ $json.intent === 'file_search_execute' ? 1 : ($json.intent === 'file_search_menu' || $json.intent === 'ask_about_file') ? 2 : $json.intent === 'file_type_selected' ? 3 : $json.intent === 'file_qa' ? 4 : 0 }}",
+        "outputsAmount": 5,
         "options": {}
       },
       "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu, 3=file_type_selected, 4=ask_about_file, 5=file_qa"
@@ -321,7 +321,7 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const response = $input.item.json;\nconst answer = (response.message && response.message.content) || response.response || '抱歉，目前無法生成回答，請稍後再試。';\nconst prevData = $('Parse Prompt').first().json;\n\n// Build LINE reply body here (not in HTTP Request) to avoid emoji in n8n expression parser\nconst replyBody = JSON.stringify({\n  replyToken: prevData.replyToken,\n  messages: [{\n    type: 'text',\n    text: answer,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u627E\\u6A94\\u6848', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    replyToken: prevData.replyToken,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    answer: answer,\n    replyBody: replyBody\n  }\n};"
+        "jsCode": "const response = $input.item.json;\nconst answer = (response.message && response.message.content) || response.response || '抱歉，目前無法生成回答，請稍後再試。';\nconst prevData = $('Parse Prompt').first().json;\n\n// Build LINE reply body here (not in HTTP Request) to avoid emoji in n8n expression parser\nconst replyBody = JSON.stringify({\n  to: prevData.lineUserId,\n  messages: [{\n    type: 'text',\n    text: answer,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u627E\\u6A94\\u6848', text: '\\u627E\\u6A94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554F\\u554F\\u984C', text: '\\u554F\\u554F\\u984C' } }\n      ]\n    }\n  }]\n});\n\nreturn {\n  json: {\n    lineUserId: prevData.lineUserId,\n    messageText: prevData.messageText,\n    to: prevData.lineUserId,\n    chunkIds: prevData.chunkIds,\n    sessionTurns: prevData.sessionTurns,\n    answer: answer,\n    replyBody: replyBody\n  }\n};"
       },
       "notes": "Extracts answer from Ollama response. References 'Parse Prompt'."
     },
@@ -336,7 +336,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "https://api.line.me/v2/bot/message/reply",
+        "url": "https://api.line.me/v2/bot/message/push",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -798,7 +798,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({question: $('Intent Router').first().json.keyword || '', top_k: 5, min_sim: 0.5, file_name: $('Intent Router').first().json.askFileName || ''}) }}",
+        "body": "={{ JSON.stringify({question: $('Intent Router').first().json.keyword || '', top_k: 5, min_sim: 0.3, file_name: $('Intent Router').first().json.askFileName || ''}) }}",
         "options": {
           "timeout": 60000
         }
@@ -987,6 +987,13 @@
         [
           {
             "node": "LINE Reply: Ask Keyword",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute: vector_search_file",
             "type": "main",
             "index": 0
           }
