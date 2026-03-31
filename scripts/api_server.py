@@ -162,10 +162,10 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_json(500, {"valid": False, "error": "line_verify.py returned non-JSON"})
 
     def _handle_vector_search(self, data: dict):
-        """POST /vector-search  {question, top_k?, min_sim?, department?} -> {chunks, count}
+        """POST /vector-search  {question, top_k?, min_sim?, department?, file_name?} -> {chunks, count}
 
-        Note: --file-name argument was removed from vector_search.py (PR #45).
-        File-specific searches should use /search-files instead.
+        Supports optional file_name filter to narrow search to a specific document.
+        Default min_sim lowered to 0.3 to reduce false negatives for Chinese embeddings.
         """
         question = data.get("question", "")
         if not question:
@@ -173,8 +173,9 @@ class APIHandler(BaseHTTPRequestHandler):
             return
 
         top_k = str(int(data.get("top_k", 5)))
-        min_sim = str(float(data.get("min_sim", 0.5)))
+        min_sim = str(float(data.get("min_sim", 0.3)))  # lowered from 0.5: Chinese embeddings typically score lower
         department = str(data.get("department", ""))
+        file_name = str(data.get("file_name", ""))
 
         args = [
             sys.executable, str(_SCRIPT_DIR / "vector_search.py"),
@@ -184,6 +185,8 @@ class APIHandler(BaseHTTPRequestHandler):
         ]
         if department:
             args += ["--department", department]
+        if file_name:
+            args += ["--file", file_name]
 
         result = self.run_script(args)
 
