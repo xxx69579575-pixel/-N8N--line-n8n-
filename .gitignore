@@ -1,0 +1,33 @@
+# 敏感資訊 — 絕對不上傳
+.env
+*.txt
+任務.txt
+
+# 明確保留的 txt（不在排除範圍）
+!requirements.txt
+!SOP-issue-to-fix.md
+
+# Log 檔
+*.log
+logs/
+
+# Runtime 狀態
+issue_cooldown.json
+processed_messages.json
+qa_workflow_current.json
+qa_workflow_fixed.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 診斷腳本（開發用，不需上傳）
+diag_*.py
+archive_threads.py
