@@ -203,7 +203,7 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: $json.askFileName ? 0.2 : 0.5, file_name: $json.askFileName || ''}) }}",
+        "body": "={{ JSON.stringify({question: $json.messageText || '', top_k: 5, min_sim: $json.askFileName ? 0.2 : 0.3, file_name: $json.askFileName || ''}) }}",
         "options": {
           "timeout": 60000
         }
