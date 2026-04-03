@@ -1,5 +1,6 @@
 # 敏感資訊 — 絕對不上傳
 .env
+config/.env
 *.txt
 任務.txt
 
@@ -27,6 +28,16 @@ dist/
 build/
 .venv/
 venv/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+tmp_prompt_*.txt
 
 # 診斷腳本（開發用，不需上傳）
 diag_*.py

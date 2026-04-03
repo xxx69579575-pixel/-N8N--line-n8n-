@@ -1,0 +1,9 @@
+python-docx
+pypdf
+openpyxl
+pytesseract
+Pillow
+pdf2image==1.17.0
+psycopg2-binary
+requests
+fpdf2==2.7.9

@@ -2,23 +2,20 @@
   "permissions": {
     "allow": [
       "mcp__plugin_discord_discord__fetch_messages",
-      "WebFetch(domain:api.github.com)",
       "mcp__plugin_discord_discord__reply",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(tasklist)",
-      "Bash(wmic process:*)",
+      "Bash(taskkill:*)",
       "Bash(curl:*)",
       "Bash(python3:*)",
-      "WebFetch(domain:raw.githubusercontent.com)",
-      "Bash(taskkill:*)",
-      "Bash(cmd /c \"taskkill /PID 106104 /F\" 2>&1)",
-      "Bash(cmd /c \"wmic process where \"\"name=''''python.exe''''\"\" get ProcessId,CommandLine\")",
-      "Bash(powershell -Command \"Get-Process python | Select-Object Id,CommandLine\" 2>&1)",
-      "Bash(powershell -Command \"Stop-Process -Id 106104 -Force; Start-Sleep 2; Set-Location 'D:\\\\n8n\\\\CLAUDE 實做\\\\claude agent遠端自動修復工作流'; Start-Process python -ArgumentList 'src/main.py' -NoNewWindow\" 2>&1)",
-      "Bash(powershell -Command \"Get-Process python | Select-Object Id\")",
-      "Bash(python -c \":*)",
-      "Bash(python -c \"import sys; sys.stdout.buffer.write\\(sys.stdin.buffer.read\\(\\)\\)\")",
-      "Bash(python:*)",
-      "Bash(claude-patched:*)"
+      "Bash(npm --version)",
+      "Bash(docker --version)",
+      "Bash(docker compose:*)",
+      "Bash(git --version)",
+      "Bash(ollama --version)",
+      "Bash(bash /tmp/worker--build-alias-list.sh)",
+      "Bash(bash /tmp/monitor--build-alias-list.sh)"
     ]
   }
 }
