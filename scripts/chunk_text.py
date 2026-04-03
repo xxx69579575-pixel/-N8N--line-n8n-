@@ -43,14 +43,41 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[dict]:
     return chunks
 
 
+def chunk_pre_split(text: str) -> list[dict]:
+    """將以 \\n\\n 分隔的預切段落各自成一個 chunk（不滑動視窗）。
+    用於 extract_text.py 已結構化輸出（如面積計算表每戶一行）的情境。
+    """
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    return [
+        {
+            "chunk_index": i,
+            "chunk_text": p,
+            "char_count": len(p),
+            "token_estimate": len(p) // 3,
+        }
+        for i, p in enumerate(paragraphs)
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Split text into overlapping chunks.")
     parser.add_argument("--text", required=True, help="Input text to chunk")
     parser.add_argument("--chunk-size", type=int, default=800, help="Characters per chunk (default: 800)")
     parser.add_argument("--overlap", type=int, default=150, help="Overlap characters between chunks (default: 150)")
+    parser.add_argument("--pre-chunked", action="store_true",
+                        help="Text is already split by \\n\\n; output one chunk per paragraph")
     args = parser.parse_args()
 
-    chunks = chunk_text(args.text, args.chunk_size, args.overlap)
+    if args.pre_chunked or "\n\n" in args.text:
+        # 若文字含段落分隔，優先用段落切片（面積表等結構化輸出）
+        paragraphs = [p.strip() for p in args.text.split("\n\n") if p.strip()]
+        if len(paragraphs) >= 2:
+            chunks = chunk_pre_split(args.text)
+        else:
+            chunks = chunk_text(args.text, args.chunk_size, args.overlap)
+    else:
+        chunks = chunk_text(args.text, args.chunk_size, args.overlap)
+
     output = json.dumps(chunks, ensure_ascii=False, indent=2)
     sys.stdout.buffer.write(output.encode("utf-8"))
     sys.stdout.buffer.write(b"\n")

@@ -65,7 +65,7 @@ class APIHandler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[api_server] {self.address_string()} {format % args}\n")
         sys.stderr.flush()
 
-    # ------------------------------------------------------------------
+# ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -141,8 +141,9 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def _handle_line_verify(self, data: dict):
         """POST /line-verify  {body, signature} -> {valid: bool}"""
+        body = data.get("body", "")
         stdin_payload = json.dumps({
-            "body": data.get("body", ""),
+            "body": body,
             "signature": data.get("signature", ""),
         }).encode("utf-8")
 

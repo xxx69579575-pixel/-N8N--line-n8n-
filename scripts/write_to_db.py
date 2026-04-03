@@ -99,8 +99,8 @@ def insert_document(conn, metadata: dict, ocr_used: bool, page_count: int) -> st
             """
             INSERT INTO documents
                 (file_name, file_ext, file_path, file_size_bytes, hash_sha256,
-                 ocr_used, page_count)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                 department, ingest_status, parse_status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -109,8 +109,9 @@ def insert_document(conn, metadata: dict, ocr_used: bool, page_count: int) -> st
                 metadata.get("file_path"),
                 metadata.get("file_size"),
                 metadata.get("hash_sha256"),
-                ocr_used,
-                page_count,
+                metadata.get("department", "general"),
+                "done",
+                "done",
             ),
         )
         row = cur.fetchone()

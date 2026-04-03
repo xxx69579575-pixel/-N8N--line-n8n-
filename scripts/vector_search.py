@@ -121,6 +121,10 @@ def search(
     )
     try:
         with conn.cursor() as cur:
+            # Raise ivfflat probes so filtered queries (e.g. single file) don't miss
+            # chunks that fall outside the default probe=1 cluster scan.
+            cur.execute("SET LOCAL ivfflat.probes = 10")
+
             filters = []
             filter_params = []
 
@@ -146,7 +150,7 @@ def search(
                 ORDER BY dc.embedding <=> %s::vector
                 LIMIT %s
             """
-            params = [embedding_str, embedding_str] + filter_params + [top_k]
+            params = [embedding_str] + filter_params + [embedding_str, top_k]
             cur.execute(query, params)
             rows = cur.fetchall()
 

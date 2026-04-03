@@ -42,15 +42,92 @@ def extract_pdf_ocr(path: str) -> tuple[str, int]:
     """將 PDF 各頁轉圖片後 OCR（需 Poppler + Tesseract）"""
     import pytesseract
     from pdf2image import convert_from_path
-    images = convert_from_path(path)
+    images = convert_from_path(path, dpi=200)
     texts = []
     for img in images:
         texts.append(pytesseract.image_to_string(img, lang="chi_tra+eng"))
     return "\n".join(texts), len(images)
 
 
+def _parse_area_table_rows(ocr_text: str) -> list[str]:
+    """從 OCR 文字中偵測面積計算表格行，每戶轉成結構化文字。
+
+    偵測條件：至少 5 行符合「戶號 + 數字序列」格式。
+    欄位對應（12欄制）：
+      欄1-8   建物各層面積(m²)
+      欄9     總面積(m²)
+      欄10    室內面積(m²)
+      欄11    公設面積(m²)
+      欄12    總坪數(坪)
+    回傳空 list 表示非表格型 PDF，應使用一般切片。
+    """
+    import re
+
+    # 修正 OCR 常見錯誤：字母O→0、字母l→1（在數字序列中）
+    def fix_ocr_nums(s: str) -> str:
+        s = re.sub(r'(?<=[A-Z])O(?=\d)', '0', s)   # AO66 → A066 (unit prefix)
+        s = re.sub(r'(?<=\d)O(?=\d)', '.', s)       # 4O66 → 4.66
+        s = re.sub(r'(?<=\d)O(?=\s)', '.', s)
+        return s
+
+    # 找出符合「戶號 數字...」的行
+    # 允許：A1 A2 ... A16、Al (OCR誤讀A1)、地下室 等
+    row_re = re.compile(
+        r'^(A\d{1,2}|Al|地下室|小計)\s+([\d.O]+(?:\s+[\d.O]+){7,})',
+        re.MULTILINE,
+    )
+
+    matches = list(row_re.finditer(fix_ocr_nums(ocr_text)))
+    if len(matches) < 3:
+        return []  # 非表格型 PDF
+
+    COL_LABELS_12 = [
+        "建物面積1", "建物面積2", "建物面積3", "建物面積4",
+        "建物面積5", "建物面積6", "建物面積7", "建物面積8",
+        "總面積m²", "室內面積m²", "公設面積m²", "總坪數",
+    ]
+    COL_LABELS_10 = [
+        "建物面積1", "建物面積2", "建物面積3", "建物面積4",
+        "建物面積5", "建物面積6",
+        "總面積m²", "室內面積m²", "公設面積m²", "總坪數",
+    ]
+
+    structured = []
+    for m in matches:
+        unit = m.group(1).replace("Al", "A1")  # OCR 字母l修正
+        vals_raw = re.split(r'\s+', m.group(2).strip())
+        vals = []
+        for v in vals_raw:
+            try:
+                vals.append(float(v))
+            except ValueError:
+                pass  # 略過無法解析的 OCR 殘留字元
+
+        n = len(vals)
+        if n == 12:
+            labels = COL_LABELS_12
+        elif n == 10:
+            labels = COL_LABELS_10
+        else:
+            # 欄數不符：直接標 最後一欄為總坪數
+            labels = [f"欄{i+1}" for i in range(n)]
+            labels[-1] = "總坪數"
+            if n >= 4:
+                labels[-2] = "公設面積m²"
+                labels[-3] = "室內面積m²"
+                labels[-4] = "總面積m²"
+
+        pairs = ", ".join(f"{labels[i]}={vals[i]}" for i in range(min(n, len(labels))))
+        structured.append(f"{unit}戶 面積資料: {pairs}")
+
+    return structured
+
+
 def extract_pdf(path: str) -> tuple[str, bool, int]:
-    """從 PDF 抽取文字；若為空則改用 OCR。回傳 (text, ocr_used, page_count)"""
+    """從 PDF 抽取文字；若為空則改用 OCR；若偵測到面積表格則結構化輸出。
+    回傳 (text, ocr_used, page_count)。
+    text 中若含 \\n\\n 分隔的結構化行，batch_ingest 會逐行切片。
+    """
     from pypdf import PdfReader
     reader = PdfReader(path)
     page_count = len(reader.pages)
@@ -59,11 +136,24 @@ def extract_pdf(path: str) -> tuple[str, bool, int]:
         t = page.extract_text()
         if t:
             parts.append(t)
-    text = "\n".join(parts).strip()
-    if not text:
+    pypdf_text = "\n".join(parts).strip()
+
+    # 若 pypdf 只得到表單欄位名稱（< 100 字且無中文），強制 OCR
+    import re as _re
+    has_cjk = bool(_re.search(r'[\u4e00-\u9fff]', pypdf_text))
+    if not pypdf_text or (len(pypdf_text) < 100 and not has_cjk):
         ocr_text, ocr_pages = extract_pdf_ocr(path)
+        rows = _parse_area_table_rows(ocr_text)
+        if rows:
+            return "\n\n".join(rows), True, max(page_count, ocr_pages)
         return ocr_text, True, max(page_count, ocr_pages)
-    return text, False, page_count
+
+    # 嘗試從 pypdf 文字偵測面積表格
+    rows = _parse_area_table_rows(pypdf_text)
+    if rows:
+        return "\n\n".join(rows), False, page_count
+
+    return pypdf_text, False, page_count
 
 
 def extract_excel(path: str) -> tuple[str, int]:
