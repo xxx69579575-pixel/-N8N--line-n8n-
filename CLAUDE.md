@@ -2,104 +2,215 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project Overview
+> **實作狀態：✅ 全部完成並驗收通過（2026-03-26）**
+> **2026-04-27 新增：LINE 檔案上傳 → 自動轉寄 mail + 同步加入知識庫**（詳見 `OPERATIONS.md`）
 
-Fully automated GitHub workflow for `https://github.com/xxx69579575-pixel/-N8N--line-n8n-`, orchestrated via two Discord bots in channel `1487718765717098526`.
+## 專案定位
 
-**Pipeline:** Issue → PR → CI/Code Review → User Approve/Merge → Post-Merge Sync
+本地 AI 企業問答助理，採 RAG 架構。三條運行中的 n8n 工作流：
 
-## Bot Roles
+1. **文件匯入流程**（`ingest_workflow_v2.json`）：每小時掃描 `D:\智能助理資料庫自動備份` → 抽文字/OCR → 切片 → Embedding → 寫入 PostgreSQL + pgvector
+2. **問答流程**（`qa_workflow.json`）：LINE 提問 → Embedding → pgvector 檢索 → Qwen2.5 生成回答 → LINE 回覆。同時負責 **LINE 檔案上傳分支**：PDF/Word/Excel/JPG → 下載 → 寄信 → 入庫
+3. **自動備份**（`backup_workflow.json`）：每天凌晨 2:00 備份 PostgreSQL，保留最近 7 份
 
-| Bot | Status | Role |
-|-----|--------|------|
-| ClaudeCode#6623 | ✅ Active | Primary orchestrator: issue detection, multi-turn agent fix, PR creation, code review, post-merge sync |
-| OpenCalw Astra | ✅ Joined channel | Secondary executor: handoff target when ClaudeCode cannot complete |
+核心技術棧：n8n（流程引擎）、Ollama + Qwen2.5（本地 LLM）、bge-m3（Embedding）、PostgreSQL + pgvector（向量知識庫）、LINE Messaging API（使用者入口）、Python API Server（n8n 與本地腳本的橋接層）、Gmail SMTP（檔案轉寄）
 
-**Handoff triggers (ClaudeCode → OpenCalw):** affected files > 3, cross-module refactor, execution timeout > 5 min, retry count > 2.
+---
 
-## Agent Architecture（核心設計）
+## 啟動資料庫
 
-### Multi-turn ClaudeAgent（取代舊版 AutoFixer）
+```bash
+cd docker_postgreSQL
+docker compose up -d
+```
 
-每個 Issue 觸發時，`ClaudeAgent`（`src/claude_agent.py`）使用 `claude --print` CLI 進行**多輪工具呼叫迴圈**，不需要 Anthropic API key，使用 Claude Pro 訂閱即可。
+- PostgreSQL：`localhost:65432`，DB `vectordb`，user `testuser`，password `testpwd`
+- pgAdmin：`http://localhost:5050`，帳號 `admin@admin.com`，密碼 `root`
+- 連接 pgAdmin 時，PostgreSQL hostname 填 `db`（docker 內部 hostname）
 
-**工具集（8 種）：**
+建立完整 Schema（5 張表 + trigger）：
 
-| 工具 | 功能 |
+```bash
+psql -h localhost -p 65432 -U testuser -d vectordb -f n8n自動存入資料庫/02_postgresql_schema.sql
+```
+
+> `init.sql` 僅含基礎 `documents` 表（向量維度 768），完整 schema 請用 `02_postgresql_schema.sql`（向量維度 1024）。
+
+---
+
+## 系統啟動順序
+
+**現在已自動化** — Windows 開機後 Task Scheduler `AI-QA-Assistant-Startup` 觸發 `start_all.bat`：等 n8n ready → 啟動 ngrok（n8n 穩定網域）→ 啟動 cloudflared（api_server 動態網址，自動寫進 `.env`）→ 重啟 api_server。詳見 `OPERATIONS.md`。
+
+手動啟動：
+
+```bash
+# 1. Docker（PostgreSQL + n8n）
+cd docker_postgreSQL && docker compose up -d
+# n8n 網址：http://localhost:5681
+
+# 2. Ollama（開機自動啟動）
+
+# 3. 一鍵啟動所有對外 tunnel + api_server
+start_all.bat
+```
+
+LINE Webhook URL（**穩定，不再變動**）：
+```
+https://quadruplication-satisfyingly-corrina.ngrok-free.dev/webhook/line-qa
+```
+
+---
+
+## Python API Server（scripts/api_server.py，port 8765）
+
+所有 n8n workflow 均透過 HTTP Request 節點呼叫，n8n 2.12+ 已封鎖 executeCommand。
+
+| 端點 | 方法 | 功能 |
+|------|------|------|
+| `/health` | GET | 健康檢查 |
+| `/list-inbox` | GET | 掃描文件收件匣（所有檔案 department 一律 `general`） |
+| `/files/<name>` | GET | 下載原始檔案 |
+| `/line-verify` | POST | LINE 簽章驗證 |
+| `/vector-search` | POST | pgvector 相似度搜尋 |
+| `/prompt-builder` | POST | 組裝 RAG Prompt |
+| `/search-files` | POST | 按關鍵字搜尋檔案 |
+| `/ingest-file` | POST | 單檔完整匯入 pipeline |
+| `/backup-db` | POST | 觸發 PostgreSQL 備份 |
+| `/line-download-content` | POST | **新** 從 LINE Content API 下載使用者上傳的檔案 |
+| `/forward-mail` | POST | **新** 透過 Gmail SMTP 寄附件信，支援單檔 (`file_path`) 或多附件 (`file_paths`) |
+
+---
+
+## 向量維度說明
+
+**已確認使用 bge-m3（1024 維）**。`docker_postgreSQL/init.sql` 為舊版（768 維），**請勿使用**，一律用 `02_postgresql_schema.sql`。
+
+| 模型 | 維度 | 使用狀態 |
+|------|------|----------|
+| bge-m3 | 1024 | ✅ 目前使用 |
+| nomic-embed-text | 768 | ❌ 舊版，已棄用 |
+
+---
+
+## 資料庫 Schema 結構
+
+完整 Schema 定義在 `n8n自動存入資料庫/02_postgresql_schema.sql`。
+
+**文件匯入相關（5 張表）**：
+- `documents`：文件主檔，含 hash_sha256 去重、ingest_status、department、confidential_level
+- `document_contents`：全文與解析結果，含 ocr_used、parse_status
+- `document_chunks`：切片內容 + `embedding VECTOR(1024)` + page_no/sheet_name/section_title
+- `document_permissions`：部門與角色層級的存取控制
+- `processing_logs`：每一步驟的處理紀錄與錯誤追蹤
+
+**問答流程相關（2 張表）**：
+- `qa_logs`：問答日誌（user_id、question、retrieved_chunk_ids、answer、confidence、created_at）
+- `allowed_users`：LINE Bot 授權白名單（`line_user_id`、`display_name`、`department`）
+
+> **新增使用者**：`INSERT INTO allowed_users (line_user_id, display_name, department) VALUES ('U...', '顯示名', 'general');` — 未授權者上傳檔案會被 Check Auth 擋下。
+
+向量索引使用 `ivfflat`（cosine），`lists = 100`。所有表有 `updated_at` trigger 自動維護。
+
+---
+
+## 環境變數
+
+實際設定在 `config/.env`（gitignore），範本在 `config/.env.example`。
+
+```
+# 資料夾路徑
+INGEST_INBOX_DIR=D:/智能助理資料庫自動備份
+INGEST_PROCESSED_DIR=D:/智能助理資料庫自動備份/processed
+INGEST_ERROR_DIR=D:/智能助理資料庫自動備份/error
+BACKUP_DIR=D:/智能助理資料庫自動備份
+BACKUP_KEEP=7
+
+# PostgreSQL
+POSTGRES_HOST=localhost
+POSTGRES_PORT=65432
+POSTGRES_DB=vectordb
+POSTGRES_USER=testuser
+POSTGRES_PASSWORD=testpwd
+
+# Ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_CHAT_MODEL=qwen2.5:7b-instruct-q4_0
+OLLAMA_EMBED_MODEL=bge-m3
+
+# LINE
+LINE_CHANNEL_ACCESS_TOKEN=（實際值存於 config/.env）
+LINE_CHANNEL_SECRET=（實際值存於 config/.env）
+
+# 問答參數
+QA_TOP_K=5
+QA_MIN_SIMILARITY=0.3
+DEFAULT_NO_ANSWER_MESSAGE=目前知識庫中沒有相關資料
+
+# API Server 對外 URL（cloudflared 動態，由 start_all.ps1 自動更新）
+API_SERVER_BASE_URL=https://<random>.trycloudflare.com
+
+# SMTP 寄信（LINE 使用者上傳檔案 → 自動轉寄）
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=（Gmail 帳號）
+SMTP_PASSWORD=（Gmail App Password，16 字元）
+FORWARD_MAIL_TO=（收件人 email）
+```
+
+---
+
+## 文件收件匣資料夾結構（2026-04-27 重整）
+
+```
+D:\智能助理資料庫自動備份\        ← INGEST_INBOX_DIR
+   PDF\          ← .pdf
+   WORD\         ← .doc / .docx
+   EXCEL\        ← .xls / .xlsx
+   JPG\          ← .jpg / .jpeg / .png（含 LINE 上傳的圖片）
+   processed\    ← 匯入成功後自動移來（保留子資料夾結構）
+   error\        ← 匯入失敗後自動移來
+```
+
+**所有檔案 `department` 欄位一律標 `general`**（不再用第一層子資料夾名當部門）。要分部門請改 `_handle_list_inbox` 邏輯。
+
+---
+
+## 工作流模組拆分
+
+**文件匯入流程**（每小時 cron）：
+GET /list-inbox → Split 逐檔 → POST /ingest-file（extract→chunk→embed→write_to_db）→ 移至 processed/error
+
+**問答流程**（單一 workflow，多分支）：
+
+LINE Webhook → 簽章驗證 → Parse Message → Query Session Early → Intent Router → Query allowed_users → Check Auth → Route File Upload (IF)
+- **TRUE 分支（檔案/圖片上傳）**：Execute: line_download_content → Aggregate Paths → Execute: forward_mail（一次寄多附件）→ Distribute Mail Result → Execute: ingest_file_upload → Build Upload Reply → LINE Reply: Upload
+- **FALSE 分支（文字訊息）**：Intent Switch → 5 條子分支（QA / 找檔案執行 / 檔案類型選單 / 關鍵字輸入 / file_qa）
+
+---
+
+## 重要實作限制
+
+- **去重必須用 SHA-256**，不可只靠檔名
+- **LINE Webhook 必須驗證簽章**（`X-Line-Signature` header + `LINE_CHANNEL_SECRET`）
+- **LINE Webhook 需公開 HTTPS URL**（用 ngrok 穩定子網域 → n8n:5681；URL 一次設好永久不動）
+- **檔案下載 URL** 用 cloudflared 動態網址 → api_server:8765；URL 變了由 `start_all.ps1` 自動寫進 `.env`
+- **單一檔案失敗不可中斷整批**，每個錯誤分支都需寫 processing_logs 並移檔至 error 資料夾
+- **RAG 硬性要求**：Qwen2.5 必須根據檢索到的 chunk 回答，查無資料時明確告知，不得自行補充未驗證資訊
+- **LINE 檔案上傳支援的副檔名**：`.pdf .doc .docx .xls .xlsx .jpg .jpeg .png`（白名單，其他類型 `/line-download-content` 回 415）
+- **n8n switch v3 最多 5 outputs**：file_upload 改用獨立 IF (`Route File Upload`) 在 Intent Switch 之前分流
+
+---
+
+## 參考文件
+
+| 檔案 | 用途 |
 |------|------|
-| `list_repo_files` | 列出 repo 檔案結構 |
-| `read_file` | 讀取任何程式碼檔案 |
-| `fetch_url` | 抓取外部 URL（文件、n8n API 等） |
-| `create_branch` | 建立 fix branch |
-| `commit_patch` | old_string→new_string 精準 patch |
-| `open_pr` | 建立 Pull Request |
-| `post_to_thread` | 回報進度到 Discord 討論串 |
-| `cannot_fix` | 說明超出範圍的根因 + 人工建議 |
-
-**Discord 討論串：**
-每個 Issue 自動在 `#agent-hub`（`1487728782902296656`）建立討論串（`issue-#N-{title}`），Agent 在串中逐步回報推理過程，問題解決後才關閉。
-
-## Pipeline Stages
-
-**Stage 1 — Issue Creation**
-- ClaudeCode#6623 在 Discord `#agent-hub` 偵測 @mention → 建立 GitHub Issue
-- GitHub Webhook → `orchestrator.assign_issue()` → 開 Discord 討論串 → 啟動 ClaudeAgent
-- 複雜度路由：所有 Issue 統一走 ClaudeAgent；複雜任務由 Agent 自行呼叫 `cannot_fix` 後轉交 OpenCalw
-
-**Stage 2 — Multi-turn Agent Fix**
-- `ClaudeAgent.fix_issue()` 在背景 thread 執行，最多 25 輪
-- 每輪：claude --print → 解析 `<tool_call>` → 執行工具 → 結果餵回下輪
-- 修改完成 → `open_pr` → PR body 含 `Fixes #N`、Description、Changes、Before/After
-
-**Stage 3 — CI + Code Review**
-- GitHub Actions (`.github/workflows/lint.yml`) on `pull_request`:
-  - `ruff check` rules E, F, I (ignore E501, E402)
-  - `ast.parse` syntax check on all `.py` files
-- ClaudeCode webhook on `pull_request opened`:
-  - `orchestrator.trigger_pr_review()` → Claude CLI 分析 diff → 發 GitHub PR comment
-  - 發現 critical issues → OpenCalw 二次審查（目前為 stub，自動 APPROVE）
-  - Auto-fix loop: up to 3 retries before escalating to `#logs`
-
-**Stage 4 — User Approve & Merge**
-- Manual: user reviews on GitHub → approve → merge
-- 48-hour inactivity → reminder posted to `#agent-hub`
-
-**Stage 5 — Post-Merge** (`github_webhook._handle_pr_merged()`)
-1. `DELETE /repos/{repo}/git/refs/heads/{branch}`
-2. Parse `Fixes #N` → `PATCH /repos/{repo}/issues/{N}` (`state: closed`)
-3. `orchestrator.trigger_post_merge_sync()` → Discord thread `sync-PR#N-{title}`:
-   - git pull 本機 repo
-   - kill 舊 PID → 重啟 `api_server.py --port 8765`
-   - health check（重試 8 次）
-   - All done → ✅ DONE, archive thread (10 min)
-
-## Error Escalation
-
-| Level | Condition | Action |
-|-------|-----------|--------|
-| 1 | First failure | Bot auto-retries (max 3×) |
-| 2 | Still failing | Other bot takes over |
-| 3 | Both bots fail | Notify user via `#logs` |
-| 4 | No user response in 4h | Issue marked 🚨 ESCALATED |
-
-**Agent 特殊升級：**
-- Agent 呼叫 `cannot_fix` → 討論串說明根因 + #logs 通知 → 等待人工介入
-- Agent 達到 25 輪上限 → 主頻道警告
-
-## Discord Channels
-
-| Channel | ID | Purpose |
-|---------|----|---------|
-| `#agent-hub` | `1487718765717098526` | 用戶回報問題（@mention ClaudeCode） |
-| `#agent-hub`（討論串） | `1487728782902296656` | 每個 Issue 的 Agent 工作空間 |
-| `#logs` | 見 .env | Errors, warnings, failures |
-| `#review-queue` | 見 .env | PRs awaiting user approval |
-
-## Implementation Phases
-
-1. ✅ ClaudeCode single-bot full pipeline (Stage 1–5)
-2. ✅ GitHub Actions CI (`lint.yml`)
-3. ✅ Multi-turn ClaudeAgent with 8 tools + Discord thread per Issue
-4. OpenCalw integration + handoff logic（進行中）
-5. Auto-fix loop (REQUEST_CHANGES → bot auto-resubmits)
-6. 48hr timeout reminder + thread archiving
+| `OPERATIONS.md` | **運行手冊 + 變更紀錄**（每次系統變動都記在這） |
+| `n8n自動存入資料庫/01_n8n工作流規劃.md` | 文件匯入流程詳細設計（含實作完成記錄） |
+| `n8n自動存入資料庫/03_ClaudeCode開發規格書.md` | 文件匯入驗收結果與交付物清單 |
+| `企業問答助理line+n8n+向量庫/01_企業問答助理_n8n工作流設計.md` | 問答流程詳細設計（含 API 端點、備份說明） |
+| `企業問答助理line+n8n+向量庫/02_ClaudeCode開發規格書_企業問答助理.md` | 問答流程驗收結果（含額外功能清單） |
+| `n8n自動存入資料庫/02_postgresql_schema.sql` | 完整資料庫 Schema（7 張資料表 + trigger） |
+| `快速安裝指南/CLAUDE.md` | 一鍵安裝控制文件（Windows/VPS/Mac） |
+| `專案任務清單.md` | 完整任務清單（Phase 0~4 全部完成） |
