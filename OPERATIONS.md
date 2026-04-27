@@ -67,6 +67,17 @@ D:\智能助理資料庫自動備份\
 
 ## 變更紀錄
 
+### 2026-04-27（下午）— 新增白名單使用者 Ariel
+- **背景**：新使用者 LINE userId `Ue9634f3484e21a92495c35b05ce7fd3f` 上傳檔案後沒收到任何回覆，也沒寄出 mail。查 n8n 執行紀錄發現停在 `Check Auth` → `authorized: false`。原因是該 LINE userId 不在 `allowed_users` 白名單。
+- **動作**：
+  ```sql
+  INSERT INTO allowed_users (line_user_id, display_name, department)
+  VALUES ('Ue9634f3484e21a92495c35b05ce7fd3f', 'Ariel', 'general');
+  ```
+- **結果**：之後 Ariel 重傳，系統正常下載 → 寄信 → 入庫 → LINE 回覆。
+- **重要**：未授權時的訊息**無法事後補處理** — workflow 在 Check Auth 就 return null，連 `/line-download-content` 都沒呼叫，LINE messageId 沒被任何節點記錄下來。授權後請使用者**重傳**才行。
+- **觀察**：同一使用者**用 LINE 連續傳 2 張圖**（拍一張傳一張）會被 LINE 拆成 2 個獨立 webhook → 各自一封信，**不會**被「合併寄信」邏輯合併。要合併成 1 封必須在 LINE app 內**同時選多個檔案**一次發送。
+
 ### 2026-04-27 — LINE 檔案轉寄 + 多檔合併寄信 + 開機自動化
 
 **功能**
