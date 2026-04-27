@@ -1,5 +1,5 @@
 {
-  "id": "line-qa-assistant-v1",
+  "id": "ANf96ECpcq8gTuPC",
   "name": "LINE QA Assistant",
   "_comments": {
     "description": "LINE QA Assistant v2 — RAG + File Search. LINE Webhook → signature verify → session/intent routing → [QA: vector search → Ollama → reply] or [File Search: /search-files → reply] or [File Menu: prompt for keyword]",
@@ -93,10 +93,9 @@
         300
       ],
       "parameters": {
-        "mode": "runOnceForEachItem",
-        "jsCode": "const data = $input.item.json;\nconst body = data.body || {};\nconst events = body.events || [];\nif (events.length === 0) return null;\nconst event = events[0];\nif (event.type !== 'message' || !event.message || event.message.type !== 'text') return null;\nreturn {\n  json: {\n    lineUserId: event.source && event.source.userId || '',\n    messageText: event.message.text || '',\n    replyToken: event.replyToken || ''\n  }\n};"
+        "jsCode": "const data = $input.first().json;\nconst body = data.body || {};\nconst events = body.events || [];\nconst out = [];\nfor (const event of events) {\n  if (event.type !== 'message' || !event.message) continue;\n  const m = event.message;\n  const t = m.type;\n  if (t !== 'text' && t !== 'file' && t !== 'image') continue;\n  out.push({\n    json: {\n      lineUserId: event.source && event.source.userId || '',\n      messageType: t,\n      messageText: m.text || '',\n      messageId: m.id || '',\n      fileName: m.fileName || '',\n      fileSize: m.fileSize || 0,\n      replyToken: event.replyToken || ''\n    }\n  });\n}\nreturn out;"
       },
-      "notes": "Extracts lineUserId, messageText, replyToken. Returns null for non-text events."
+      "notes": "Emits one item per LINE event. Accepts text/file/image. Multi-event webhooks (e.g. user uploads several PDFs at once) flow through downstream nodes once per item."
     },
     {
       "id": "qa-node-020",
@@ -130,9 +129,9 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const parsedMsg = $('Parse Message').first().json;\nconst text = parsedMsg.messageText || '';\nconst sessionData = $input.item.json;\nconst mode = sessionData.mode || null;\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\nlet askFileName = '';\n\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\n// 保留關鍵字優先於 session mode（點選 Quick Reply 固定按鈕時）\nif (text === '找檔案') {\n  intent = 'file_search_menu';\n} else if (text === '問問題') {\n  intent = 'qa';\n} else if (text.startsWith('問:')) {\n  intent = 'ask_about_file';\n  askFileName = text.slice(2).trim();\n} else if (mode && mode.startsWith('asking_about:')) {\n  intent = 'file_qa';\n  askFileName = mode.slice('asking_about:'.length);\n  keyword = text;\n} else if (mode === 'waiting_filetype') {\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa';\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1];\n} else {\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: parsedMsg.lineUserId,\n    messageText: text,\n    replyToken: parsedMsg.replyToken,\n    sessionMode: mode,\n    sessionTurns: sessionData.turns || [],\n    intent,\n    keyword,\n    fileType,\n    askFileName,\n  }\n};"
+        "jsCode": "const parsedMsg = $('Parse Message').itemMatching($itemIndex).json;\nconst text = parsedMsg.messageText || '';\nconst messageType = parsedMsg.messageType || 'text';\nconst sessionData = $input.item.json;\nconst mode = sessionData.mode || null;\n\nlet intent = 'qa';\nlet keyword = '';\nlet fileType = '';\nlet askFileName = '';\n\nconst FILE_TYPE_MAP = { 'PDF': 'pdf', 'Word': 'docx', 'Excel': 'xlsx', 'JPG': 'jpg' };\n\nif (messageType === 'file' || messageType === 'image') {\n  intent = 'file_upload';\n} else if (text === '找檔案') {\n  intent = 'file_search_menu';\n} else if (text === '問問題') {\n  intent = 'qa';\n} else if (text.startsWith('問:')) {\n  intent = 'ask_about_file';\n  askFileName = text.slice(2).trim();\n} else if (mode && mode.startsWith('asking_about:')) {\n  intent = 'file_qa';\n  askFileName = mode.slice('asking_about:'.length);\n  keyword = text;\n} else if (mode === 'waiting_filetype') {\n  const selectedType = FILE_TYPE_MAP[text];\n  if (selectedType) {\n    intent = 'file_type_selected';\n    fileType = selectedType;\n  } else {\n    intent = 'qa';\n  }\n} else if (mode && mode.startsWith('waiting_keyword:')) {\n  intent = 'file_search_execute';\n  keyword = text;\n  fileType = mode.split(':')[1];\n} else {\n  intent = 'qa';\n}\n\nreturn {\n  json: {\n    lineUserId: parsedMsg.lineUserId,\n    messageType,\n    messageText: text,\n    messageId: parsedMsg.messageId || '',\n    fileName: parsedMsg.fileName || '',\n    fileSize: parsedMsg.fileSize || 0,\n    replyToken: parsedMsg.replyToken,\n    sessionMode: mode,\n    sessionTurns: sessionData.turns || [],\n    intent,\n    keyword,\n    fileType,\n    askFileName,\n  }\n};"
       },
-      "notes": "Determines intent: 'qa' (RAG), 'file_search_execute' (when mode=waiting_keyword), 'file_search_menu' (when text='找檔案'). Sets keyword for file_search_execute."
+      "notes": "Determines intent. file/image message → 'file_upload' (download + forward mail + ingest). Text routing: 'qa' / 'file_search_*' / 'ask_about_file' / 'file_qa' / 'file_type_selected'."
     },
     {
       "id": "qa-node-008",
@@ -166,9 +165,41 @@
       ],
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const authResult = $input.item.json;\nconst intentData = $('Intent Router').first().json;\n\nif (!authResult.authorized) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.line.me/v2/bot/message/reply',\n      headers: {\n        'Authorization': 'Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=',\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({\n        replyToken: intentData.replyToken,\n        messages: [{ type: 'text', text: '\\u60a8\\u7121\\u4f7f\\u7528\\u6b0a\\u9650' }]\n      })\n    });\n  } catch(e) {}\n  return null;\n}\n\n// Authorized - pass intent data through\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    messageText: intentData.messageText,\n    replyToken: intentData.replyToken,\n    sessionMode: intentData.sessionMode,\n    sessionTurns: intentData.sessionTurns,\n    intent: intentData.intent,\n    keyword: intentData.keyword,\n    fileType: intentData.fileType,\n    askFileName: intentData.askFileName,\n  }\n};"
+        "jsCode": "const authResult = $input.item.json;\nconst intentData = $('Intent Router').itemMatching($itemIndex).json;\n\nif (!authResult.authorized) {\n  try {\n    await $helpers.httpRequest({\n      method: 'POST',\n      url: 'https://api.line.me/v2/bot/message/reply',\n      headers: {\n        'Authorization': 'Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU=',\n        'Content-Type': 'application/json'\n      },\n      body: JSON.stringify({\n        replyToken: intentData.replyToken,\n        messages: [{ type: 'text', text: '\\u60a8\\u7121\\u4f7f\\u7528\\u6b0a\\u9650' }]\n      })\n    });\n  } catch(e) {}\n  return null;\n}\n\n// Authorized - pass intent data through\nreturn {\n  json: {\n    lineUserId: intentData.lineUserId,\n    messageType: intentData.messageType || 'text',\n    messageText: intentData.messageText,\n    messageId: intentData.messageId || '',\n    fileName: intentData.fileName || '',\n    fileSize: intentData.fileSize || 0,\n    replyToken: intentData.replyToken,\n    sessionMode: intentData.sessionMode,\n    sessionTurns: intentData.sessionTurns,\n    intent: intentData.intent,\n    keyword: intentData.keyword,\n    fileType: intentData.fileType,\n    askFileName: intentData.askFileName,\n  }\n};"
       },
       "notes": "Checks auth. If unauthorized: sends LINE reply and returns null. If authorized: passes intent data through for Switch routing."
+    },
+    {
+      "id": "qa-node-route-upload",
+      "name": "Route File Upload",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2125,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-file-upload",
+              "leftValue": "={{ $json.intent }}",
+              "rightValue": "file_upload",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "notes": "Splits file_upload (true → file forward+ingest pipeline) from text-based intents (false → Intent Switch). Needed because Switch v3 caps at 5 outputs."
     },
     {
       "id": "qa-node-022",
@@ -185,7 +216,7 @@
         "outputsAmount": 5,
         "options": {}
       },
-      "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu, 3=file_type_selected, 4=ask_about_file, 5=file_qa"
+      "notes": "Routes: 0=qa (RAG), 1=file_search_execute, 2=file_search_menu/ask_about_file, 3=file_type_selected, 4=file_qa. (file_upload handled by 'Route File Upload' IF before this switch.)"
     },
     {
       "id": "qa-node-005",
@@ -805,6 +836,156 @@
       }
     },
     {
+      "id": "qa-node-040",
+      "name": "Execute: line_download_content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2500,
+        1300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/line-download-content",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ message_id: $('Intent Router').first().json.messageId || '', file_name: $('Intent Router').first().json.fileName || '' }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "notes": "file_upload branch: download user-uploaded file from LINE Content API, save under inbox/<BUCKET>/."
+    },
+    {
+      "id": "qa-node-041",
+      "name": "Aggregate Paths",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2750,
+        1300
+      ],
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: collapse N items into 1, carrying file_paths array + the original items so we can re-fan out after the HTTP call.\nconst items = $input.all();\nconst file_paths = [];\nconst originalItems = [];\nfor (const item of items) {\n  originalItems.push(item.json);\n  if (item.json && item.json.file_path) file_paths.push(item.json.file_path);\n}\nreturn [{ json: { file_paths, originalItems } }];"
+      },
+      "notes": "Collects all downloaded file_paths into one item so the HTTP forward_mail node fires only once with file_paths array."
+    },
+    {
+      "id": "qa-node-041b",
+      "name": "Execute: forward_mail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2900,
+        1300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/forward-mail",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ file_paths: $json.file_paths || [] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Single HTTP call to /forward-mail with all file_paths attached; api_server combines them into ONE email."
+    },
+    {
+      "id": "qa-node-041c",
+      "name": "Distribute Mail Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3050,
+        1300
+      ],
+      "parameters": {
+        "jsCode": "// runOnceForAllItems: take the single mail response + the original items captured in Aggregate Paths, re-fan out into N items so downstream (ingest + reply) runs per file.\nconst mailResp = $input.first().json || {};\nconst agg = $('Aggregate Paths').first().json || {};\nconst orig = Array.isArray(agg.originalItems) ? agg.originalItems : [];\nreturn orig.map(itemJson => ({\n  json: Object.assign({}, itemJson, { mailResp })\n}));"
+      },
+      "notes": "Restores per-file items after the single mail call. Each item carries the shared mailResp so Build Upload Reply can show the same mail status to all replies."
+    },
+    {
+      "id": "qa-node-042",
+      "name": "Execute: ingest_file_upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3000,
+        1300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8765/ingest-file",
+        "sendHeaders": false,
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ JSON.stringify({ file_path: $json.file_path || '', department: 'general' }) }}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Run normal ingest pipeline (extract → chunk → embed → write_to_db) + move to processed/. Reads $json.file_path from upstream (Forward Mail Batch preserves it). continueOnFail so reply still runs."
+    },
+    {
+      "id": "qa-node-043",
+      "name": "Build Upload Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3250,
+        1300
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const ir = $('Intent Router').itemMatching($itemIndex).json;\nconst dl = $('Execute: line_download_content').itemMatching($itemIndex).json || {};\nconst dist = $('Distribute Mail Result').itemMatching($itemIndex).json || {};\nconst mailResp = dist.mailResp || {};\nconst ingestResp = $input.item.json || {};\n\nconst fileName = dl.file_name || ir.fileName || '(未命名)';\nconst mailOK = mailResp && mailResp.success === true;\nconst attachCount = (mailResp && mailResp.attachment_count) || 0;\nconst ingestOK = ingestResp && ingestResp.success === true;\n\nconst lines = [\n  '\\u2705 \\u5df2\\u6536\\u5230\\u6a94\\u6848\\uFF1A' + fileName,\n  mailOK\n    ? ('\\u2709 \\u5df2\\u8f49\\u5bc4\\u81f3\\uFF1A' + (mailResp.to || '') + (attachCount > 1 ? ' (\\u5408\\u4f75 ' + attachCount + ' \\u4efd\\u9644\\u4ef6)' : ''))\n    : ('\\u26a0\\ufe0f \\u8f49\\u5bc4\\u90f5\\u4ef6\\u5931\\u6557' + (mailResp && mailResp.error ? ('\\uFF1A' + mailResp.error) : '')),\n  ingestOK\n    ? '\\u2709 \\u5df2\\u52a0\\u5165\\u77e5\\u8b58\\u5eab\\uFF0C\\u4e4b\\u5f8c\\u53ef\\u63a5\\u67e5\\u8a62'\n    : ('\\u26a0\\ufe0f \\u77e5\\u8b58\\u5eab\\u532f\\u5165\\u5931\\u6557' + (ingestResp && ingestResp.error ? ('\\uFF1A' + ingestResp.error) : ''))\n];\nconst text = lines.join('\\n');\n\nconst replyBody = JSON.stringify({\n  replyToken: ir.replyToken,\n  messages: [{\n    type: 'text',\n    text: text,\n    quickReply: {\n      items: [\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDD0D \\u627e\\u6a94\\u6848', text: '\\u627e\\u6a94\\u6848' } },\n        { type: 'action', action: { type: 'message', label: '\\uD83D\\uDCAC \\u554f\\u554f\\u984c', text: '\\u554f\\u554f\\u984c' } }\n      ]\n    }\n  }]\n});\n\nreturn { json: { lineUserId: ir.lineUserId, replyToken: ir.replyToken, replyBody } };"
+      },
+      "notes": "Builds LINE reply per file. mailResp shared across the batch (one mail with N attachments). Uses itemMatching for paired access."
+    },
+    {
+      "id": "qa-node-044",
+      "name": "LINE Reply: Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3500,
+        1300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer zfUhwyDkW+q8PbPReXde6cN7d5g0EDaoRLiJN5q8x1mw15Sy4M19MqZRafcrheFOUfu+26krT110NoFELUjJWgB5pSnzRzoOh8w9oJu75Fzcnx126tN0gS1te8GtRzxkiFqHC6zmAFvfDuCFMaR/0gdB04t89/1O/w1cDnyilFU="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.replyBody }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "continueOnFail": true,
+      "notes": "Sends upload-complete reply to LINE."
+    },
+    {
       "id": "qa-node-018",
       "name": "Error Trigger",
       "type": "n8n-nodes-base.errorTrigger",
@@ -954,6 +1135,24 @@
       "main": [
         [
           {
+            "node": "Route File Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route File Upload": {
+      "main": [
+        [
+          {
+            "node": "Execute: line_download_content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
             "node": "Intent Switch",
             "type": "main",
             "index": 0
@@ -994,6 +1193,83 @@
         [
           {
             "node": "Execute: vector_search_file",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute: line_download_content": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Paths",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Paths": {
+      "main": [
+        [
+          {
+            "node": "Execute: forward_mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute: forward_mail": {
+      "main": [
+        [
+          {
+            "node": "Distribute Mail Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Distribute Mail Result": {
+      "main": [
+        [
+          {
+            "node": "Execute: ingest_file_upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute: ingest_file_upload": {
+      "main": [
+        [
+          {
+            "node": "Build Upload Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Upload Reply": {
+      "main": [
+        [
+          {
+            "node": "LINE Reply: Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LINE Reply: Upload": {
+      "main": [
+        [
+          {
+            "node": "Update Session: Clear Mode",
             "type": "main",
             "index": 0
           }
@@ -1285,7 +1561,7 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "errorWorkflow": "line-qa-assistant-v1"
+    "errorWorkflow": "hAz6zL8XtCTWyQ1D"
   },
   "pinData": {}
 }

@@ -15,12 +15,14 @@ Endpoints:
     GET  /health
     GET  /list-inbox
     GET  /files/<name>
-    POST /line-verify      {body, signature}                         -> {valid: bool}
-    POST /vector-search    {question, top_k?, min_sim?, department?} -> [{chunk_id,...}]
-    POST /search-files     {keyword, file_type?}                     -> {results, count}
-    POST /prompt-builder   {question, chunks, history}               -> {system, prompt}
-    POST /ingest-file      {file_path, department?}                  -> {success, ...}
-    POST /backup-db        {backup_dir?, keep?}                      -> {success, ...}
+    POST /line-verify             {body, signature}                         -> {valid: bool}
+    POST /vector-search           {question, top_k?, min_sim?, department?} -> [{chunk_id,...}]
+    POST /search-files            {keyword, file_type?}                     -> {results, count}
+    POST /prompt-builder          {question, chunks, history}               -> {system, prompt}
+    POST /ingest-file             {file_path, department?}                  -> {success, ...}
+    POST /backup-db               {backup_dir?, keep?}                      -> {success, ...}
+    POST /line-download-content   {message_id, file_name?}                  -> {success, file_path, ...}
+    POST /forward-mail            {file_path, subject?, body?, to?}         -> {success, ...}
 """
 
 import sys
@@ -129,6 +131,10 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._handle_ingest_file(data)
             elif self.path == "/backup-db":
                 self._handle_backup_db(data)
+            elif self.path == "/line-download-content":
+                self._handle_line_download_content(data)
+            elif self.path == "/forward-mail":
+                self._handle_forward_mail(data)
             else:
                 self.send_json(404, {"error": "Not found"})
         except Exception as e:
@@ -356,7 +362,13 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": str(e)})
 
     def _handle_list_inbox(self):
-        """GET /list-inbox — scan INGEST_INBOX_DIR (including subfolders as department)."""
+        """GET /list-inbox — scan INGEST_INBOX_DIR.
+
+        Folder layout (no department, just file-type buckets):
+            INGEST_INBOX_DIR/
+                PDF/   WORD/   EXCEL/   JPG/    ← all department='general'
+                processed/   error/             ← skipped
+        """
         inbox_dir = os.environ.get("INGEST_INBOX_DIR", "")
         if not inbox_dir or not os.path.isdir(inbox_dir):
             self.send_json(200, {"files": [], "count": 0, "inbox_dir": inbox_dir, "warning": "INGEST_INBOX_DIR not set or not found"})
@@ -369,12 +381,6 @@ class APIHandler(BaseHTTPRequestHandler):
         for root, dirs, fnames in os.walk(inbox_dir):
             dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
 
-            rel = os.path.relpath(root, inbox_dir)
-            if rel == ".":
-                department = "general"
-            else:
-                department = rel.split(os.sep)[0]
-
             for fname in fnames:
                 ext = os.path.splitext(fname)[1].lower()
                 if ext not in supported:
@@ -385,7 +391,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     "file_path": fpath,
                     "file_ext": ext,
                     "file_size": os.path.getsize(fpath),
-                    "department": department,
+                    "department": "general",
                 })
 
         self.send_json(200, {"files": files, "count": len(files), "inbox_dir": inbox_dir})
@@ -526,6 +532,216 @@ class APIHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             self.send_json(500, {"error": "prompt_builder.py returned non-JSON"})
 
+    # ------------------------------------------------------------------
+    # LINE: download user-uploaded file/image content
+    # ------------------------------------------------------------------
+
+    EXT_TO_BUCKET = {
+        ".pdf":  "PDF",
+        ".doc":  "WORD",
+        ".docx": "WORD",
+        ".xls":  "EXCEL",
+        ".xlsx": "EXCEL",
+        ".jpg":  "JPG",
+        ".jpeg": "JPG",
+        ".png":  "JPG",
+    }
+
+    def _handle_line_download_content(self, data: dict):
+        """POST /line-download-content {message_id, file_name?} -> {success, file_path, bucket, ...}
+
+        Calls LINE Content API to fetch a file/image the user sent, saves it under
+        INGEST_INBOX_DIR/<BUCKET>/, where BUCKET ∈ {PDF, WORD, EXCEL, JPG}.
+        """
+        import urllib.request
+        import time
+
+        message_id = str(data.get("message_id", "")).strip()
+        if not message_id:
+            self.send_json(400, {"error": "Missing required field: message_id"})
+            return
+
+        token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+        if not token:
+            self.send_json(500, {"error": "LINE_CHANNEL_ACCESS_TOKEN not set"})
+            return
+
+        inbox_dir = os.environ.get("INGEST_INBOX_DIR", "").strip()
+        if not inbox_dir or not os.path.isdir(inbox_dir):
+            self.send_json(500, {"error": f"INGEST_INBOX_DIR invalid: {inbox_dir}"})
+            return
+
+        url = f"https://api-data.line.me/v2/bot/message/{urllib.parse.quote(message_id)}/content"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content = resp.read()
+                content_type = resp.headers.get("Content-Type", "").lower()
+        except Exception as e:
+            self.send_json(502, {"error": f"LINE Content API failed: {e}"})
+            return
+
+        raw_name = str(data.get("file_name", "")).strip()
+        ext = ""
+        if raw_name:
+            ext = os.path.splitext(raw_name)[1].lower()
+        if not ext:
+            mime_ext = {
+                "application/pdf": ".pdf",
+                "image/jpeg": ".jpg",
+                "image/png":  ".png",
+                "application/msword": ".doc",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                "application/vnd.ms-excel": ".xls",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+            }
+            for prefix, mapped in mime_ext.items():
+                if content_type.startswith(prefix):
+                    ext = mapped
+                    break
+
+        bucket = self.EXT_TO_BUCKET.get(ext, "")
+        if not bucket:
+            self.send_json(415, {
+                "error": f"Unsupported file type (ext={ext!r}, content-type={content_type!r})",
+                "supported": list(set(self.EXT_TO_BUCKET.values())),
+            })
+            return
+
+        bucket_dir = os.path.join(inbox_dir, bucket)
+        os.makedirs(bucket_dir, exist_ok=True)
+
+        if raw_name:
+            base = os.path.basename(raw_name)
+            stem, raw_ext = os.path.splitext(base)
+            if raw_ext.lower() != ext:
+                base = stem + ext
+        else:
+            base = f"LINE_{message_id}_{int(time.time())}{ext}"
+
+        target_path = os.path.join(bucket_dir, base)
+        if os.path.exists(target_path):
+            stem, e = os.path.splitext(base)
+            target_path = os.path.join(bucket_dir, f"{stem}_{int(time.time())}{e}")
+
+        try:
+            with open(target_path, "wb") as f:
+                f.write(content)
+        except Exception as e:
+            self.send_json(500, {"error": f"Failed to save file: {e}"})
+            return
+
+        self.send_json(200, {
+            "success": True,
+            "file_path": target_path,
+            "file_name": os.path.basename(target_path),
+            "file_size": len(content),
+            "bucket": bucket,
+            "ext": ext,
+        })
+
+    # ------------------------------------------------------------------
+    # Forward a local file as email attachment via SMTP
+    # ------------------------------------------------------------------
+
+    def _handle_forward_mail(self, data: dict):
+        """POST /forward-mail {file_path | file_paths, subject?, body?, to?} -> {success, ...}
+
+        Sends one email with one OR multiple files attached over SMTP.
+        Accepts either `file_path` (string, single file) or `file_paths` (array, multiple files in one mail).
+        Defaults: to=FORWARD_MAIL_TO, subject auto-built from filename(s), body listing files.
+        """
+        import smtplib
+        import ssl
+        from email.message import EmailMessage
+        import mimetypes
+
+        # Normalize input: prefer file_paths (array). Fall back to file_path (single).
+        raw_paths = data.get("file_paths")
+        if raw_paths is None:
+            single = str(data.get("file_path", "")).strip()
+            paths = [single] if single else []
+        else:
+            if not isinstance(raw_paths, list):
+                self.send_json(400, {"error": "file_paths must be an array"})
+                return
+            paths = [str(p).strip() for p in raw_paths if str(p).strip()]
+
+        if not paths:
+            self.send_json(400, {"error": "No file_path/file_paths supplied"})
+            return
+
+        missing = [p for p in paths if not os.path.isfile(p)]
+        if missing:
+            self.send_json(404, {"error": "File(s) not found", "missing": missing})
+            return
+
+        smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+        smtp_user = os.environ.get("SMTP_USER", "").strip()
+        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+        default_to = os.environ.get("FORWARD_MAIL_TO", "").strip()
+
+        if not smtp_user or not smtp_password:
+            self.send_json(500, {"error": "SMTP_USER / SMTP_PASSWORD not set in .env"})
+            return
+
+        recipient = str(data.get("to", "")).strip() or default_to
+        if not recipient:
+            self.send_json(400, {"error": "No recipient (set FORWARD_MAIL_TO in .env or pass `to`)"})
+            return
+
+        file_names = [os.path.basename(p) for p in paths]
+        if len(paths) == 1:
+            default_subject = f"LINE 轉寄: {file_names[0]}"
+            default_body = f"由 LINE Bot 自動轉寄\n檔名: {file_names[0]}"
+        else:
+            default_subject = f"LINE 轉寄: {file_names[0]} 等 {len(paths)} 份檔案"
+            default_body = "由 LINE Bot 自動轉寄\n附件清單:\n" + "\n".join(f"  - {n}" for n in file_names)
+
+        subject = str(data.get("subject", "")).strip() or default_subject
+        body = str(data.get("body", "")).strip() or default_body
+
+        msg = EmailMessage()
+        msg["From"] = smtp_user
+        msg["To"] = recipient
+        msg["Subject"] = subject
+        msg.set_content(body)
+
+        for p in paths:
+            ctype, _ = mimetypes.guess_type(p)
+            if ctype is None:
+                ctype = "application/octet-stream"
+            maintype, subtype = ctype.split("/", 1)
+            try:
+                with open(p, "rb") as f:
+                    msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(p))
+            except Exception as e:
+                self.send_json(500, {"error": f"Failed to read attachment {p}: {e}"})
+                return
+
+        try:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(msg)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.send_json(502, {"success": False, "error": f"SMTP send failed: {e}"})
+            return
+
+        self.send_json(200, {
+            "success": True,
+            "to": recipient,
+            "subject": subject,
+            "file_names": file_names,
+            "attachment_count": len(paths),
+            "total_size": sum(os.path.getsize(p) for p in paths),
+        })
+
 
 # ------------------------------------------------------------------
 # Entry point
@@ -539,7 +755,7 @@ def main():
 
     server = HTTPServer((args.host, args.port), APIHandler)
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db\n")
+    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db /line-download-content /forward-mail\n")
     sys.stderr.flush()
     try:
         server.serve_forever()

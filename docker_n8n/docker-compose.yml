@@ -11,7 +11,7 @@ services:
       - N8N_PROTOCOL=http
       - N8N_DIAGNOSTICS_ENABLED=false
       - N8N_VERSION_NOTIFICATIONS_ENABLED=false
-      - WEBHOOK_URL=https://dayton-allan-temple-roots.trycloudflare.com
+      - WEBHOOK_URL=https://quadruplication-satisfyingly-corrina.ngrok-free.dev
       - GENERIC_TIMEZONE=Asia/Taipei
       - TZ=Asia/Taipei
       # LINE Messaging API
