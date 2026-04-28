@@ -644,12 +644,19 @@ class APIHandler(BaseHTTPRequestHandler):
     # Forward a local file as email attachment via SMTP
     # ------------------------------------------------------------------
 
+    # Gmail SMTP hard limit is 25MB per message (after base64 encoding).
+    # Base64 inflates by ~33%, so 18MB raw → ~24MB encoded, leaving 1MB headroom for headers/body.
+    MAIL_BATCH_MAX_BYTES = 18 * 1024 * 1024
+
     def _handle_forward_mail(self, data: dict):
         """POST /forward-mail {file_path | file_paths, subject?, body?, to?} -> {success, ...}
 
-        Sends one email with one OR multiple files attached over SMTP.
-        Accepts either `file_path` (string, single file) or `file_paths` (array, multiple files in one mail).
+        Sends N emails with attachments over SMTP. Multiple files are bin-packed into batches
+        each ≤ MAIL_BATCH_MAX_BYTES so we never hit Gmail's 25MB-per-message limit.
+
+        Accepts either `file_path` (string) or `file_paths` (array).
         Defaults: to=FORWARD_MAIL_TO, subject auto-built from filename(s), body listing files.
+        Subject for batched sends auto-suffixed with `(i/N)`.
         """
         import smtplib
         import ssl
@@ -676,6 +683,17 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_json(404, {"error": "File(s) not found", "missing": missing})
             return
 
+        # Reject single oversized files — they can't be split.
+        oversized = [(os.path.basename(p), os.path.getsize(p)) for p in paths
+                     if os.path.getsize(p) > self.MAIL_BATCH_MAX_BYTES]
+        if oversized:
+            self.send_json(413, {
+                "success": False,
+                "error": f"File(s) exceed Gmail SMTP per-message limit ({self.MAIL_BATCH_MAX_BYTES // (1024*1024)}MB raw)",
+                "oversized": [{"name": n, "size": s} for n, s in oversized],
+            })
+            return
+
         smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
         smtp_port = int(os.environ.get("SMTP_PORT", "587"))
         smtp_user = os.environ.get("SMTP_USER", "").strip()
@@ -691,35 +709,63 @@ class APIHandler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "No recipient (set FORWARD_MAIL_TO in .env or pass `to`)"})
             return
 
-        file_names = [os.path.basename(p) for p in paths]
-        if len(paths) == 1:
-            default_subject = f"LINE 轉寄: {file_names[0]}"
-            default_body = f"由 LINE Bot 自動轉寄\n檔名: {file_names[0]}"
-        else:
-            default_subject = f"LINE 轉寄: {file_names[0]} 等 {len(paths)} 份檔案"
-            default_body = "由 LINE Bot 自動轉寄\n附件清單:\n" + "\n".join(f"  - {n}" for n in file_names)
-
-        subject = str(data.get("subject", "")).strip() or default_subject
-        body = str(data.get("body", "")).strip() or default_body
-
-        msg = EmailMessage()
-        msg["From"] = smtp_user
-        msg["To"] = recipient
-        msg["Subject"] = subject
-        msg.set_content(body)
-
+        # Bin-pack files into batches each ≤ MAIL_BATCH_MAX_BYTES (greedy, keeps original order).
+        batches = []
+        cur_paths = []
+        cur_size = 0
         for p in paths:
-            ctype, _ = mimetypes.guess_type(p)
-            if ctype is None:
-                ctype = "application/octet-stream"
-            maintype, subtype = ctype.split("/", 1)
-            try:
-                with open(p, "rb") as f:
-                    msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(p))
-            except Exception as e:
-                self.send_json(500, {"error": f"Failed to read attachment {p}: {e}"})
-                return
+            sz = os.path.getsize(p)
+            if cur_paths and cur_size + sz > self.MAIL_BATCH_MAX_BYTES:
+                batches.append(cur_paths)
+                cur_paths = []
+                cur_size = 0
+            cur_paths.append(p)
+            cur_size += sz
+        if cur_paths:
+            batches.append(cur_paths)
 
+        file_names = [os.path.basename(p) for p in paths]
+        user_subject = str(data.get("subject", "")).strip()
+        user_body = str(data.get("body", "")).strip()
+
+        def build_message(batch_paths, batch_idx):
+            batch_names = [os.path.basename(p) for p in batch_paths]
+            if user_subject:
+                subj = user_subject
+            elif len(paths) == 1:
+                subj = f"LINE 轉寄: {file_names[0]}"
+            else:
+                subj = f"LINE 轉寄: {file_names[0]} 等 {len(paths)} 份檔案"
+            if len(batches) > 1:
+                subj = f"{subj} ({batch_idx}/{len(batches)})"
+
+            if user_body:
+                body_text = user_body
+            elif len(paths) == 1:
+                body_text = f"由 LINE Bot 自動轉寄\n檔名: {file_names[0]}"
+            else:
+                body_text = "由 LINE Bot 自動轉寄\n附件清單:\n" + "\n".join(f"  - {n}" for n in file_names)
+            if len(batches) > 1:
+                body_text += f"\n\n(此為第 {batch_idx}/{len(batches)} 封；本批附件:\n" + \
+                             "\n".join(f"  - {n}" for n in batch_names) + ")"
+
+            m = EmailMessage()
+            m["From"] = smtp_user
+            m["To"] = recipient
+            m["Subject"] = subj
+            m.set_content(body_text)
+            for p in batch_paths:
+                ctype, _ = mimetypes.guess_type(p)
+                if ctype is None:
+                    ctype = "application/octet-stream"
+                maintype, subtype = ctype.split("/", 1)
+                with open(p, "rb") as f:
+                    m.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(p))
+            return m, subj
+
+        sent_files = []
+        sent_subjects = []
+        failed_batches = []
         try:
             ctx = ssl.create_default_context()
             with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
@@ -727,19 +773,38 @@ class APIHandler(BaseHTTPRequestHandler):
                 server.starttls(context=ctx)
                 server.ehlo()
                 server.login(smtp_user, smtp_password)
-                server.send_message(msg)
+                for i, batch in enumerate(batches, 1):
+                    try:
+                        m, subj = build_message(batch, i)
+                        server.send_message(m)
+                        sent_files.extend(os.path.basename(p) for p in batch)
+                        sent_subjects.append(subj)
+                    except Exception as e:
+                        traceback.print_exc(file=sys.stderr)
+                        failed_batches.append({
+                            "batch": i,
+                            "files": [os.path.basename(p) for p in batch],
+                            "error": str(e),
+                        })
         except Exception as e:
             traceback.print_exc(file=sys.stderr)
-            self.send_json(502, {"success": False, "error": f"SMTP send failed: {e}"})
+            self.send_json(502, {
+                "success": False,
+                "error": f"SMTP connection failed: {e}",
+                "batch_count": len(batches),
+            })
             return
 
         self.send_json(200, {
-            "success": True,
+            "success": len(failed_batches) == 0,
             "to": recipient,
-            "subject": subject,
+            "subject": sent_subjects[0] if sent_subjects else "",
             "file_names": file_names,
             "attachment_count": len(paths),
             "total_size": sum(os.path.getsize(p) for p in paths),
+            "batch_count": len(batches),
+            "sent_files": sent_files,
+            "failed_batches": failed_batches,
         })
 
 
