@@ -928,11 +928,11 @@
         "rawContentType": "application/json",
         "body": "={{ JSON.stringify({ file_path: $json.file_path || '', department: 'general' }) }}",
         "options": {
-          "timeout": 180000
+          "timeout": 300000
         }
       },
       "continueOnFail": true,
-      "notes": "Run normal ingest pipeline (extract → chunk → embed → write_to_db) + move to processed/. Reads $json.file_path from upstream (Forward Mail Batch preserves it). continueOnFail so reply still runs."
+      "notes": "Run normal ingest pipeline (extract → chunk → embed → write_to_db) + move to processed/. Reads $json.file_path from upstream (Forward Mail Batch preserves it). continueOnFail so reply still runs. Timeout 300s aligned with cron ingest_workflow_v2 (scanned PDFs with OCR + bge-m3 embed can run >3min)."
     },
     {
       "id": "qa-node-043",
