@@ -32,7 +32,7 @@ import argparse
 import subprocess
 import traceback
 import urllib.parse
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -753,7 +753,8 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
 
-    server = HTTPServer((args.host, args.port), APIHandler)
+    server = ThreadingHTTPServer((args.host, args.port), APIHandler)
+    server.daemon_threads = True
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
     sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db /line-download-content /forward-mail\n")
     sys.stderr.flush()
