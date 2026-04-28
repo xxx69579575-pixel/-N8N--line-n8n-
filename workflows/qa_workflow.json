@@ -851,12 +851,12 @@
         "sendBody": true,
         "contentType": "raw",
         "rawContentType": "application/json",
-        "body": "={{ JSON.stringify({ message_id: $('Intent Router').first().json.messageId || '', file_name: $('Intent Router').first().json.fileName || '' }) }}",
+        "body": "={{ JSON.stringify({ message_id: $json.messageId || '', file_name: $json.fileName || '' }) }}",
         "options": {
           "timeout": 60000
         }
       },
-      "notes": "file_upload branch: download user-uploaded file from LINE Content API, save under inbox/<BUCKET>/."
+      "notes": "file_upload branch: download user-uploaded file from LINE Content API, save under inbox/<BUCKET>/. MUST use $json (per-item) not $('Intent Router').first() — multi-file uploads emit N items and .first() collapses them all onto the first event's messageId."
     },
     {
       "id": "qa-node-041",
