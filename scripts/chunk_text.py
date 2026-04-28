@@ -43,20 +43,40 @@ def chunk_text(text: str, chunk_size: int, overlap: int) -> list[dict]:
     return chunks
 
 
-def chunk_pre_split(text: str) -> list[dict]:
-    """將以 \\n\\n 分隔的預切段落各自成一個 chunk（不滑動視窗）。
-    用於 extract_text.py 已結構化輸出（如面積計算表每戶一行）的情境。
+def chunk_pre_split(text: str, chunk_size: int = 800) -> list[dict]:
+    """將以 \\n\\n 分隔的段落聚合成 chunks，每個 chunk 盡量逼近 chunk_size。
+
+    用於 extract_text.py 已結構化輸出的情境（OCR 破碎短行、面積計算表等）。
+    短段落會被連續聚合，避免破碎 OCR 產生過量小 chunks（如 27KB → 502 chunks
+    的退化 case）。超過 chunk_size 的單一大段落獨立成 chunk，避免句子被切斷。
     """
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    return [
-        {
-            "chunk_index": i,
-            "chunk_text": p,
-            "char_count": len(p),
-            "token_estimate": len(p) // 3,
-        }
-        for i, p in enumerate(paragraphs)
-    ]
+    chunks = []
+    cur_text = ""
+    cur_index = 0
+
+    for p in paragraphs:
+        # 加上這段會超過 chunk_size 且當前 chunk 已有內容 → flush
+        if cur_text and len(cur_text) + len(p) + 2 > chunk_size:
+            chunks.append({
+                "chunk_index": cur_index,
+                "chunk_text": cur_text,
+                "char_count": len(cur_text),
+                "token_estimate": len(cur_text) // 3,
+            })
+            cur_index += 1
+            cur_text = ""
+        cur_text = cur_text + "\n\n" + p if cur_text else p
+
+    if cur_text:
+        chunks.append({
+            "chunk_index": cur_index,
+            "chunk_text": cur_text,
+            "char_count": len(cur_text),
+            "token_estimate": len(cur_text) // 3,
+        })
+
+    return chunks
 
 
 def main():
@@ -65,14 +85,13 @@ def main():
     parser.add_argument("--chunk-size", type=int, default=800, help="Characters per chunk (default: 800)")
     parser.add_argument("--overlap", type=int, default=150, help="Overlap characters between chunks (default: 150)")
     parser.add_argument("--pre-chunked", action="store_true",
-                        help="Text is already split by \\n\\n; output one chunk per paragraph")
+                        help="Text is already split by \\n\\n; aggregate paragraphs up to --chunk-size")
     args = parser.parse_args()
 
     if args.pre_chunked or "\n\n" in args.text:
-        # 若文字含段落分隔，優先用段落切片（面積表等結構化輸出）
         paragraphs = [p.strip() for p in args.text.split("\n\n") if p.strip()]
         if len(paragraphs) >= 2:
-            chunks = chunk_pre_split(args.text)
+            chunks = chunk_pre_split(args.text, args.chunk_size)
         else:
             chunks = chunk_text(args.text, args.chunk_size, args.overlap)
     else:
