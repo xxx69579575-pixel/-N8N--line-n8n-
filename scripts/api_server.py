@@ -439,8 +439,11 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise RuntimeError("無法取得文字內容（空白或純圖片 PDF）")
             extracted["metadata"]["department"] = department
 
+            # Pipe text via stdin (NOT --text argv) to bypass Windows' 32,768-char
+            # command-line limit — large Excel/PDF extracts hit [WinError 206].
             r2 = self.run_script(
-                [sys.executable, str(_SCRIPT_DIR / "chunk_text.py"), "--text", text],
+                [sys.executable, str(_SCRIPT_DIR / "chunk_text.py")],
+                stdin_data=text.encode("utf-8"),
             )
             if r2.returncode != 0:
                 raise RuntimeError(f"chunk_text failed: {r2.stderr.decode('utf-8', errors='replace')[:300]}")

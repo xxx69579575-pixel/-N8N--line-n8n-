@@ -81,21 +81,25 @@ def chunk_pre_split(text: str, chunk_size: int = 800) -> list[dict]:
 
 def main():
     parser = argparse.ArgumentParser(description="Split text into overlapping chunks.")
-    parser.add_argument("--text", required=True, help="Input text to chunk")
+    parser.add_argument("--text", help="Input text to chunk (if omitted, read from stdin)")
     parser.add_argument("--chunk-size", type=int, default=800, help="Characters per chunk (default: 800)")
     parser.add_argument("--overlap", type=int, default=150, help="Overlap characters between chunks (default: 150)")
     parser.add_argument("--pre-chunked", action="store_true",
                         help="Text is already split by \\n\\n; aggregate paragraphs up to --chunk-size")
     args = parser.parse_args()
 
-    if args.pre_chunked or "\n\n" in args.text:
-        paragraphs = [p.strip() for p in args.text.split("\n\n") if p.strip()]
+    # Read from stdin when --text omitted, to avoid Windows command-line length limit
+    # (32,768 chars triggers [WinError 206] when caller has large extracted text).
+    text = args.text if args.text is not None else sys.stdin.buffer.read().decode("utf-8")
+
+    if args.pre_chunked or "\n\n" in text:
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
         if len(paragraphs) >= 2:
-            chunks = chunk_pre_split(args.text, args.chunk_size)
+            chunks = chunk_pre_split(text, args.chunk_size)
         else:
-            chunks = chunk_text(args.text, args.chunk_size, args.overlap)
+            chunks = chunk_text(text, args.chunk_size, args.overlap)
     else:
-        chunks = chunk_text(args.text, args.chunk_size, args.overlap)
+        chunks = chunk_text(text, args.chunk_size, args.overlap)
 
     output = json.dumps(chunks, ensure_ascii=False, indent=2)
     sys.stdout.buffer.write(output.encode("utf-8"))
