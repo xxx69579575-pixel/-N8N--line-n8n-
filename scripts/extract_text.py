@@ -55,15 +55,45 @@ def _ocr_pdf_page(args):
     return page_idx, text
 
 
+def _console_python() -> str:
+    """Return a console python.exe path for multiprocessing children.
+
+    api_server.py runs under pythonw.exe (no console). multiprocessing under
+    pythonw.exe DEADLOCKS on Windows — the spawned children have no valid
+    stdin/stdout/stderr, so the spawn bootstrap hangs forever (this caused the
+    stuck OCR process trees). Point the workers at the console python.exe instead.
+    """
+    exe = sys.executable or ""
+    if os.path.basename(exe).lower() == "pythonw.exe":
+        cand = os.path.join(os.path.dirname(exe), "python.exe")
+        if os.path.isfile(cand):
+            return cand
+    return exe
+
+
+def _ocr_pdf_sequential(path: str, n_pages: int, dpi: int) -> str:
+    """OCR pages one-by-one in the current process. Slower but never deadlocks —
+    used as a fallback when the parallel pool fails or times out."""
+    import pytesseract
+    from pdf2image import convert_from_path
+    parts = []
+    for i in range(n_pages):
+        images = convert_from_path(path, dpi=dpi, first_page=i + 1, last_page=i + 1)
+        if images:
+            parts.append(pytesseract.image_to_string(images[0], lang="chi_tra+eng", config="--oem 1"))
+    return "\n".join(parts)
+
+
 def extract_pdf_ocr(path: str) -> tuple[str, int]:
     """OCR each PDF page in parallel (one worker process per page).
 
     Pages are rendered + OCR'd independently in worker processes via
     multiprocessing.Pool, leveraging multi-core CPUs. On 20-core hardware
     ≈10× speedup vs sequential, scales near-linearly with page count up to
-    cpu_count.
+    cpu_count. Falls back to sequential OCR if the pool errors or times out
+    (e.g. multiprocessing fragility under pythonw.exe).
     """
-    from multiprocessing import Pool, cpu_count
+    import multiprocessing as mp
     from pdf2image import pdfinfo_from_path
 
     info = pdfinfo_from_path(path)
@@ -75,18 +105,32 @@ def extract_pdf_ocr(path: str) -> tuple[str, int]:
 
     if n_pages == 1:
         # Single-page: skip pool spawn overhead entirely.
-        import pytesseract
-        from pdf2image import convert_from_path
-        images = convert_from_path(path, dpi=DPI)
-        text = pytesseract.image_to_string(images[0], lang="chi_tra+eng", config="--oem 1")
-        return text, 1
+        return _ocr_pdf_sequential(path, 1, DPI), 1
 
-    n_workers = min(cpu_count(), n_pages)
+    ctx = mp.get_context("spawn")
+    try:
+        ctx.set_executable(_console_python())
+    except Exception:
+        pass
+
+    n_workers = min(ctx.cpu_count(), n_pages)
     args = [(path, i, DPI) for i in range(n_pages)]
-    with Pool(processes=n_workers) as pool:
-        results = pool.map(_ocr_pdf_page, args)
-    results.sort(key=lambda x: x[0])
-    return "\n".join(r[1] for r in results), n_pages
+    # Generous overall ceiling so a wedged worker can't hang forever; the
+    # api_server subprocess timeout is the outer backstop.
+    pool_timeout = max(180, n_pages * 60)
+
+    pool = ctx.Pool(processes=n_workers)
+    try:
+        results = pool.map_async(_ocr_pdf_page, args).get(timeout=pool_timeout)
+        pool.close()
+        pool.join()
+        results.sort(key=lambda x: x[0])
+        return "\n".join(r[1] for r in results), n_pages
+    except Exception as e:
+        pool.terminate()
+        pool.join()
+        sys.stderr.write(f"[extract_text] parallel OCR failed ({e!r}); falling back to sequential\n")
+        return _ocr_pdf_sequential(path, n_pages, DPI), n_pages
 
 
 def _parse_area_table_rows(ocr_text: str) -> list[str]:
@@ -274,4 +318,6 @@ def main():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
     main()
