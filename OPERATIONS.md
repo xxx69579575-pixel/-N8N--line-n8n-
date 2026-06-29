@@ -2,7 +2,7 @@
 
 本專案的「運行手冊 + 變更紀錄」。每次系統有功能新增、bug 修正、或架構調整，**追加**到「變更紀錄」最上方並更新「系統架構」相關章節。
 
-最後更新：2026-04-27
+最後更新：2026-06-23
 
 ---
 
@@ -47,14 +47,17 @@ D:\智能助理資料庫自動備份\
 | WORD | `.doc` `.docx` |
 | EXCEL | `.xls` `.xlsx` |
 | JPG | `.jpg` `.jpeg` `.png` |
+| ZIP | `.zip`（**只轉寄 mail、不入庫**） |
 
 其他副檔名的檔案會在 `/line-download-content` 被回 415 拒絕，不入庫。
+
+`.zip` 屬「不解析入庫」類型（`api_server.NON_INGEST_EXTS`）：照常下載 + 轉寄 mail，但 `/ingest-file` 會 graceful skip（回 `skipped:true`），檔案移至 `processed/ZIP/`，LINE 回覆顯示「📦 壓縮檔已轉寄，未加入知識庫」。
 
 ### LINE 訊息流程
 
 **文字訊息**（QA / 找檔案 / 問檔案 …）→ 既有 5 條分支處理（vector_search → Ollama 生成 / search_files / 檔案類型選單 / 關鍵字輸入 / file_qa）。
 
-**檔案/圖片訊息**（PDF / Word / Excel / JPG / JPEG / PNG）：
+**檔案/圖片訊息**（PDF / Word / Excel / JPG / JPEG / PNG / ZIP）：
 
 1. LINE Webhook → 簽章驗證 → Parse Message（**每筆 event 各一個 item**，支援一次多檔）
 2. Intent Router 判 `file_upload` → `Route File Upload` (IF) → file_upload 鏈
@@ -66,6 +69,31 @@ D:\智能助理資料庫自動備份\
 ---
 
 ## 變更紀錄
+
+### 2026-06-23 — 修復 PDF OCR 在 `pythonw.exe` 下卡死（multiprocessing 死鎖）
+- **症狀**：整台電腦持續轉圈圈變鈍。查出 `api_server.py`（PID 1920）對同一個 `金泳公司章程.pdf` 在 16:32 / 17:03 / 18:03 重複觸發 3 次文字擷取，每次都卡死沒結束（各跑 46 分～2 小時17分、CPU 只耗 123～384 秒＝**阻塞而非運算**），每棵各自又開了 multiprocessing 子程序在背景空轉吃 CPU。
+- **根本原因（三層）**：
+  1. `api_server.py` 跑在 `pythonw.exe`（無 console），`extract_pdf_ocr` 開的 `multiprocessing.Pool` 子程序繼承 `pythonw.exe` → 子程序 `stdin/stdout` 為 `None`，spawn 啟動程序**永久死鎖**（commit `1a22b47` 改並行 OCR 後引入）。
+  2. `run_script` 的 `subprocess.run` **沒設 timeout** → api_server 請求執行緒永遠等下去。
+  3. 沒有防重入機制 → 每小時匯入 cron 重掃到仍在 inbox 的同一檔，又生一棵新的卡死程序樹。
+- **改動**：
+  - `scripts/extract_text.py`：multiprocessing 子程序改用 console `python.exe`（`_console_python()`，偵測到 `sys.executable` 是 pythonw 時切換）；新增 `freeze_support()`；pool 加 `map_async(...).get(timeout=max(180, 頁數×60))`，逾時/錯誤時 `terminate()` 並 fallback 到**循序 OCR**（`_ocr_pdf_sequential`，不開子程序、不會死鎖）。
+  - `scripts/api_server.py`：`run_script` 改 `Popen + communicate(timeout=...)`，逾時時 `taskkill /F /T /PID` **整棵程序樹一起砍**（含 MP worker 與 poppler 的 `pdftoppm` 孫程序）；各步驟逾時 `EXTRACT_TIMEOUT_SECS=600 / CHUNK=180 / EMBED=1800 / DB=180`（皆可用環境變數覆寫）；`/ingest-file` 新增 `_INGEST_INPROGRESS` 單檔處理中鎖（`threading.Lock`），cron 重疊時回 `{skipped:true, reason:"已在處理中"}`。
+- **部署**：`Stop-Process 1920` → `watchdog_api.ps1` 重起（新 pid 140568、`/health` ok）。
+- **驗證**：① 在 `pythonw.exe` 下以 PIPE+timeout 擷取該 PDF → **4.2 秒**完成（原本卡 2 小時以上）、`returncode=0`、OCR 2 頁、1793 字；② 把檔從 `error/PDF/` 移回 inbox 後打 `/ingest-file` → **16.3 秒**完成、`success:true`、3 chunks 寫入 DB（`document_id d708401d…`）、檔案移至 `processed/PDF/`；③ 殘留卡死程序 0。
+
+### 2026-06-23 — LINE 上傳 `.zip` 也能轉寄 mail
+- **背景**：使用者在 LINE 上傳 `.zip`（如「114年第四梯次初級AI應用規劃師…公告.zip」10.1MB）後完全沒收到回覆。原因：`.zip` 不在 `api_server.EXT_TO_BUCKET` 白名單，`/line-download-content` 回 415，file_upload 鏈中斷。
+- **需求**：`.zip` 也要能下載 + 轉寄 mail（壓縮檔無法解析，**不需入庫**）。
+- **改動**：
+  - `scripts/api_server.py`：`EXT_TO_BUCKET` 新增 `.zip → ZIP` 桶 + zip MIME（`application/zip`、`application/x-zip-compressed`）；新增 `NON_INGEST_EXTS = {".zip"}`；`/ingest-file` 開頭判斷副檔名，屬不解析類型則直接移到 `processed/` 並回 `{success:true, skipped:true}`（不跑 extract/chunk/embed）。
+  - `workflows/qa_workflow.json`（**Build Upload Reply**）：新增 `ingestSkipped` 判斷，skip 時 LINE 回覆顯示「📦 壓縮檔已轉寄，未加入知識庫」，不再誤報「知識庫匯入失敗」。
+- **後續修正（同日）— 大附件轉寄 timeout**：第一次實測 10.1MB zip 下載+跳過入庫都正常，但 mail 回「⚠️ 轉寄郵件失敗」。查 `api_server.err.log`：`smtplib` 的 socket `timeout=30` 在上傳 base64 膨脹後（~13.7MB）的附件途中逾時 → `TimeoutError: write operation timed out` → `SMTPServerDisconnected`。小檔（docx）沒事，大檔必爆。
+  - `scripts/api_server.py`：`_handle_forward_mail` 的 SMTP timeout 改為**依附件大小動態計算**：`min(280, max(60, 45 + 編碼後bytes // (80*1024)))`，可用 `SMTP_TIMEOUT` 環境變數覆寫。
+  - `workflows/qa_workflow.json`（**Execute: forward_mail**）：node timeout `60000 → 300000`（原本 60s 會比 api_server 先放棄）。
+  - **Build Upload Reply**：skip 訊息由「📦 壓縮檔已轉寄，未加入知識庫」改為「📦 壓縮檔不加入知識庫」——避免在 mail 失敗時還顯示「已轉寄」自相矛盾（轉寄狀態由第二行 `已轉寄至 / 轉寄郵件失敗` 負責）。
+  - **驗證**：直接打 `/forward-mail` 送 10MB 合法 zip 到自己信箱 → 60s 完成、`success:true`。（註：Gmail 對「非合法壓縮檔／含可執行內容的 zip」會回 `552 security block`，正常 exam zip 不受影響。）
+- **部署**：重啟 `api_server.py`（watchdog 重起 pid）；`docker cp` + `n8n import:workflow` 進 `ai-qa-n8n` → `docker restart ai-qa-n8n`。驗證：`/health` ok、workflow 仍 active、deployed jsCode 含 `ingestSkipped`×2、forward_mail timeout=300000、dummy zip 打 `/ingest-file` 回 `skipped:true` 並移至 `processed/ZIP/`。
 
 ### 2026-04-27（下午）— 新增白名單使用者 Ariel
 - **背景**：新使用者 LINE userId `Ue9634f3484e21a92495c35b05ce7fd3f` 上傳檔案後沒收到任何回覆，也沒寄出 mail。查 n8n 執行紀錄發現停在 `Check Auth` → `authorized: false`。原因是該 LINE userId 不在 `allowed_users` 白名單。
@@ -191,3 +219,38 @@ n8n CLI 已經夠用，發新 key 是「之後想用 REST API 自動化推送」
 6. **看 n8n 執行紀錄**：瀏覽器開 `http://localhost:5681` → 左欄 **Executions** → 找 `LINE QA Assistant` 最近的執行 → 點開看哪個 node 紅了
 7. **看 api_server stderr**：`Get-Content "$env:LOCALAPPDATA\ai-qa-startup\api_server.log" -Tail 50`
 8. **看 LINE Developers Console** → 你的 Bot → Messaging API → Webhook URL 還是不是那串穩定網址？按 **Verify** 應回 Success
+9. **webhook intake 層級掉訊息（Executions 看不到、執行紀錄為零）**：
+   - 症狀：LINE 有送進來但 n8n 沒有對應 execution、使用者也沒收到回覆。
+   - 確認：`docker logs ai-qa-n8n | Select-String "Error in handling webhook request"`，
+     或看 ngrok 側錄 `http://localhost:4040/api/requests/http`，LINE 那筆 upstream 狀態若為 `0` 即是。
+   - 成因：n8n 在「啟動執行」最前端瞬間失敗（多為主機 I/O/CPU 卡頓時 sqlite 寫入失敗）。
+     此類失敗**不會觸發 errorTrigger、不存 execution、不回覆**，且 **LINE 不重送 → 檔案/提問遺失**。
+   - 補救：請對方**重傳**（LINE 端內容有下載期限，逾期就拿不回）。
+   - 偵測：已由排程任務 `AI-QA-n8n-LogWatchdog`（每 5 分鐘）掃 log，命中即寄告警到 `ALERT_MAIL_TO`。
+
+---
+
+## 變更紀錄：掉訊息偵測 + 錯誤通知修復（2026-06-29）
+
+**背景**：2026-06-29 10:02 一則 LINE 檔案上傳因 n8n intake 層級瞬間失敗被靜默丟棄（全 log 史上僅此 1 次），
+使用者毫無感知。基礎設施全程健康，根因為一次性瞬斷 + 兩條告警鏈本來就是斷的。
+
+**修正項目**：
+1. **新增 `/notify` 端點**（`scripts/api_server.py`）：寄純文字告警信，收件人 `ALERT_MAIL_TO`（未設則 fallback `FORWARD_MAIL_TO`）。
+2. **新增掉訊息 watchdog**（`scripts/watchdog_n8n_log.ps1` + `watchdog_n8n_launch.vbs`）：
+   排程任務 `AI-QA-n8n-LogWatchdog` 每 5 分鐘掃 `docker logs ai-qa-n8n` 的
+   `Error in handling webhook request`，命中即 POST `/notify` 告警。冪等（state 檔記檢查點，不重複告警）。
+3. **修 Error Workflow 通知目標**（n8n `hAz6zL8XtCTWyQ1D`）：
+   HTTP 節點原本 POST 到 `host.docker.internal:8080/webhook/n8n-error`（**該 port 無人聽，通知進黑洞**），
+   改為 `host.docker.internal:8765/notify`；body 改用正確 errorTrigger 欄位
+   （`$json.workflow.name`、`$json.execution.error.message`、`$json.execution.id`、`$json.execution.lastNodeExecuted`），
+   並加 `onError=continueRegularOutput` 防止告警自身失敗時連鎖。
+4. **新增 `.env`：`ALERT_MAIL_TO`**（系統告警收件人，預設管理者本人）。
+
+**兩條告警鏈的分工**：
+- 排程 watchdog → 抓 **intake 層級**靜默掉訊息（不觸發 errorTrigger 的那種）。
+- Error Workflow → 抓 **節點層級**錯誤（會觸發 errorTrigger、有存 execution 的那種）。
+
+**待辦（未做，需決策）**：
+- n8n DB 由 sqlite 遷移到 PostgreSQL（降低 intake 寫入失敗機率；屬有停機與資料風險的變更）。
+- 主機 `Group Policy Client (gpsvc)` 服務每 5 分鐘啟動逾時（每天 ~125 次）— Windows OS 層問題，需管理員權限修復。

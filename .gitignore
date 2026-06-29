@@ -38,6 +38,13 @@ Thumbs.db
 
 # Temp
 tmp_prompt_*.txt
+tmp_*
+# 開發/除錯截圖
+executions.png
+n8n_api_page.png
+workflow_check.png
+# Playwright MCP 暫存
+.playwright-mcp/
 
 # 診斷腳本（開發用，不需上傳）
 diag_*.py

@@ -30,6 +30,7 @@ import json
 import os
 import argparse
 import subprocess
+import threading
 import traceback
 import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -37,6 +38,19 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parent
+
+# Per-step subprocess timeouts (seconds). A hung step (e.g. OCR deadlock) must NOT
+# block the request thread forever, otherwise the hourly ingest cron piles up
+# duplicate stuck process trees. Override via env if a genuinely huge doc needs more.
+EXTRACT_TIMEOUT_SECS = int(os.environ.get("EXTRACT_TIMEOUT_SECS") or 600)
+CHUNK_TIMEOUT_SECS = int(os.environ.get("CHUNK_TIMEOUT_SECS") or 180)
+EMBED_TIMEOUT_SECS = int(os.environ.get("EMBED_TIMEOUT_SECS") or 1800)
+DB_TIMEOUT_SECS = int(os.environ.get("DB_TIMEOUT_SECS") or 180)
+
+# Re-entrancy guard: the hourly ingest cron can re-trigger the same file before a
+# previous (slow) run finishes. Track in-progress paths so we skip duplicates.
+_INGEST_INPROGRESS = set()
+_INGEST_LOCK = threading.Lock()
 
 
 def _load_dotenv(path: str) -> None:
@@ -84,17 +98,34 @@ class APIHandler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         return json.loads(raw.decode("utf-8-sig"))
 
-    def run_script(self, args_list, stdin_data: bytes = None) -> subprocess.CompletedProcess:
+    def run_script(self, args_list, stdin_data: bytes = None, timeout: int = None) -> subprocess.CompletedProcess:
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUTF8"] = "1"
-        return subprocess.run(
+        proc = subprocess.Popen(
             args_list,
-            input=stdin_data,
-            capture_output=True,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=str(_PROJECT_ROOT),
             env=env,
         )
+        try:
+            out, err = proc.communicate(input=stdin_data, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # communicate()/run() only kill the direct child; multiprocessing workers
+            # and poppler (pdftoppm) grandchildren survive and keep spinning the CPU.
+            # taskkill /T tears down the whole tree.
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            except Exception:
+                proc.kill()
+            proc.wait()
+            raise
+        return subprocess.CompletedProcess(args_list, proc.returncode, out, err)
 
     # ------------------------------------------------------------------
     # Routes
@@ -135,6 +166,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._handle_line_download_content(data)
             elif self.path == "/forward-mail":
                 self._handle_forward_mail(data)
+            elif self.path == "/notify":
+                self._handle_notify(data)
             else:
                 self.send_json(404, {"error": "Not found"})
         except Exception as e:
@@ -398,8 +431,6 @@ class APIHandler(BaseHTTPRequestHandler):
 
     def _handle_ingest_file(self, data: dict):
         """POST /ingest-file  {file_path, department?} -> {success, file_name, chunk_count, error?}"""
-        import shutil
-
         file_path = data.get("file_path", "").strip()
         if not file_path:
             self.send_json(400, {"error": "Missing required field: file_path"})
@@ -407,6 +438,28 @@ class APIHandler(BaseHTTPRequestHandler):
         if not os.path.isfile(file_path):
             self.send_json(404, {"error": f"File not found: {file_path}"})
             return
+
+        # Skip if the same file is already being ingested (hourly cron overlap).
+        abs_path = os.path.abspath(file_path)
+        with _INGEST_LOCK:
+            if abs_path in _INGEST_INPROGRESS:
+                self.send_json(200, {
+                    "success": False,
+                    "skipped": True,
+                    "file_name": os.path.basename(file_path),
+                    "reason": "已在處理中（前一輪 ingest 尚未完成）",
+                })
+                return
+            _INGEST_INPROGRESS.add(abs_path)
+
+        try:
+            self._ingest_file_locked(data, file_path)
+        finally:
+            with _INGEST_LOCK:
+                _INGEST_INPROGRESS.discard(abs_path)
+
+    def _ingest_file_locked(self, data: dict, file_path: str):
+        import shutil  # noqa: F811
 
         department = str(data.get("department", "general"))
         file_name = os.path.basename(file_path)
@@ -427,8 +480,23 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as mv_err:
                 sys.stderr.write(f"[api_server] move error: {mv_err}\n")
 
+        # 壓縮檔等無法解析的類型：跳過 RAG ingest，僅移至 processed 保留（mail 已另行轉寄）
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext in self.NON_INGEST_EXTS:
+            move_file(processed_root)
+            self.send_json(200, {
+                "success": True,
+                "skipped": True,
+                "file_name": file_name,
+                "reason": f"{ext} 類型不解析入庫，僅轉寄郵件",
+            })
+            return
+
         try:
-            r1 = self.run_script([sys.executable, str(_SCRIPT_DIR / "extract_text.py"), file_path])
+            r1 = self.run_script(
+                [sys.executable, str(_SCRIPT_DIR / "extract_text.py"), file_path],
+                timeout=EXTRACT_TIMEOUT_SECS,
+            )
             if r1.returncode != 0:
                 raise RuntimeError(f"extract_text failed: {r1.stderr.decode('utf-8', errors='replace')[:300]}")
             extracted = json.loads(r1.stdout.decode("utf-8"))
@@ -439,8 +507,12 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise RuntimeError("無法取得文字內容（空白或純圖片 PDF）")
             extracted["metadata"]["department"] = department
 
+            # Pipe text via stdin (NOT --text argv) to bypass Windows' 32,768-char
+            # command-line limit — large Excel/PDF extracts hit [WinError 206].
             r2 = self.run_script(
-                [sys.executable, str(_SCRIPT_DIR / "chunk_text.py"), "--text", text],
+                [sys.executable, str(_SCRIPT_DIR / "chunk_text.py")],
+                stdin_data=text.encode("utf-8"),
+                timeout=CHUNK_TIMEOUT_SECS,
             )
             if r2.returncode != 0:
                 raise RuntimeError(f"chunk_text failed: {r2.stderr.decode('utf-8', errors='replace')[:300]}")
@@ -449,7 +521,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 raise RuntimeError("切片結果為空")
 
             chunks_bytes = json.dumps(chunks, ensure_ascii=False).encode("utf-8")
-            r3 = self.run_script([sys.executable, str(_SCRIPT_DIR / "embed_chunks.py")], stdin_data=chunks_bytes)
+            r3 = self.run_script([sys.executable, str(_SCRIPT_DIR / "embed_chunks.py")], stdin_data=chunks_bytes, timeout=EMBED_TIMEOUT_SECS)
             if r3.returncode != 0:
                 raise RuntimeError(f"embed_chunks failed: {r3.stderr.decode('utf-8', errors='replace')[:300]}")
             embedded_chunks = json.loads(r3.stdout.decode("utf-8"))
@@ -461,7 +533,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 "page_count": extracted.get("page_count", 1),
                 "chunks": embedded_chunks,
             }, ensure_ascii=False).encode("utf-8")
-            r4 = self.run_script([sys.executable, str(_SCRIPT_DIR / "write_to_db.py")], stdin_data=db_payload)
+            r4 = self.run_script([sys.executable, str(_SCRIPT_DIR / "write_to_db.py")], stdin_data=db_payload, timeout=DB_TIMEOUT_SECS)
             if r4.returncode != 0:
                 raise RuntimeError(f"write_to_db failed: {r4.stderr.decode('utf-8', errors='replace')[:300]}")
             db_result = json.loads(r4.stdout.decode("utf-8"))
@@ -545,7 +617,11 @@ class APIHandler(BaseHTTPRequestHandler):
         ".jpg":  "JPG",
         ".jpeg": "JPG",
         ".png":  "JPG",
+        ".zip":  "ZIP",
     }
+
+    # 副檔名無法解析入庫（只下載 + 轉寄 mail，不跑 RAG ingest）
+    NON_INGEST_EXTS = {".zip"}
 
     def _handle_line_download_content(self, data: dict):
         """POST /line-download-content {message_id, file_name?} -> {success, file_path, bucket, ...}
@@ -594,6 +670,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
                 "application/vnd.ms-excel": ".xls",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                "application/zip": ".zip",
+                "application/x-zip-compressed": ".zip",
             }
             for prefix, mapped in mime_ext.items():
                 if content_type.startswith(prefix):
@@ -647,6 +725,59 @@ class APIHandler(BaseHTTPRequestHandler):
     # Gmail SMTP hard limit is 25MB per message (after base64 encoding).
     # Base64 inflates by ~33%, so 18MB raw → ~24MB encoded, leaving 1MB headroom for headers/body.
     MAIL_BATCH_MAX_BYTES = 18 * 1024 * 1024
+
+    def _handle_notify(self, data: dict):
+        """POST /notify {subject?, message, to?} -> {success}
+
+        Sends a plain-text alert email (no attachment) via the same SMTP config
+        as /forward-mail. Used to surface failures that would otherwise be silent:
+          - the n8n Error Workflow (node-level errors that fire errorTrigger)
+          - the n8n log watchdog (webhook intake-level drops that save no execution)
+        Recipient defaults to ALERT_MAIL_TO, falling back to FORWARD_MAIL_TO.
+        """
+        import smtplib
+        import ssl
+        from email.message import EmailMessage
+
+        smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+        smtp_user = os.environ.get("SMTP_USER", "").strip()
+        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+        default_to = (os.environ.get("ALERT_MAIL_TO", "").strip()
+                      or os.environ.get("FORWARD_MAIL_TO", "").strip())
+
+        if not smtp_user or not smtp_password:
+            self.send_json(500, {"error": "SMTP_USER / SMTP_PASSWORD not set in .env"})
+            return
+
+        recipient = str(data.get("to", "")).strip() or default_to
+        if not recipient:
+            self.send_json(400, {"error": "No recipient (set ALERT_MAIL_TO/FORWARD_MAIL_TO or pass `to`)"})
+            return
+
+        subject = str(data.get("subject", "")).strip() or "[AI-QA] 系統告警"
+        message = str(data.get("message", "")).strip() or "(no message body)"
+
+        m = EmailMessage()
+        m["From"] = smtp_user
+        m["To"] = recipient
+        m["Subject"] = subject
+        m.set_content(message)
+
+        try:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(m)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.send_json(502, {"success": False, "error": f"SMTP failed: {e}"})
+            return
+
+        self.send_json(200, {"success": True, "to": recipient, "subject": subject})
 
     def _handle_forward_mail(self, data: dict):
         """POST /forward-mail {file_path | file_paths, subject?, body?, to?} -> {success, ...}
@@ -763,12 +894,22 @@ class APIHandler(BaseHTTPRequestHandler):
                     m.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=os.path.basename(p))
             return m, subj
 
+        # Socket timeout must cover uploading the (base64-inflated) attachments, not just
+        # connect/login. A fixed 30s times out on multi-MB files over a slow uplink, leaving
+        # the SMTP server disconnected mid-DATA. Scale by encoded size (~4/3 of raw) assuming
+        # a conservative ~80 KB/s effective throughput, +45s base for TLS handshake + AUTH.
+        # Cap at 280s to stay under the n8n forward_mail node timeout (300s).
+        total_bytes = sum(os.path.getsize(p) for p in paths)
+        smtp_timeout = int(os.environ.get("SMTP_TIMEOUT") or 0)
+        if smtp_timeout <= 0:
+            smtp_timeout = min(280, max(60, 45 + (total_bytes * 4 // 3) // (80 * 1024)))
+
         sent_files = []
         sent_subjects = []
         failed_batches = []
         try:
             ctx = ssl.create_default_context()
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=smtp_timeout) as server:
                 server.ehlo()
                 server.starttls(context=ctx)
                 server.ehlo()
@@ -821,7 +962,7 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), APIHandler)
     server.daemon_threads = True
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db /line-download-content /forward-mail\n")
+    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db /line-download-content /forward-mail /notify\n")
     sys.stderr.flush()
     try:
         server.serve_forever()

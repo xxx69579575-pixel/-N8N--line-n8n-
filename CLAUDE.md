@@ -168,6 +168,7 @@ D:\智能助理資料庫自動備份\        ← INGEST_INBOX_DIR
    WORD\         ← .doc / .docx
    EXCEL\        ← .xls / .xlsx
    JPG\          ← .jpg / .jpeg / .png（含 LINE 上傳的圖片）
+   ZIP\          ← .zip（只轉寄 mail，不解析入庫）
    processed\    ← 匯入成功後自動移來（保留子資料夾結構）
    error\        ← 匯入失敗後自動移來
 ```
@@ -197,7 +198,7 @@ LINE Webhook → 簽章驗證 → Parse Message → Query Session Early → Inte
 - **檔案下載 URL** 用 cloudflared 動態網址 → api_server:8765；URL 變了由 `start_all.ps1` 自動寫進 `.env`
 - **單一檔案失敗不可中斷整批**，每個錯誤分支都需寫 processing_logs 並移檔至 error 資料夾
 - **RAG 硬性要求**：Qwen2.5 必須根據檢索到的 chunk 回答，查無資料時明確告知，不得自行補充未驗證資訊
-- **LINE 檔案上傳支援的副檔名**：`.pdf .doc .docx .xls .xlsx .jpg .jpeg .png`（白名單，其他類型 `/line-download-content` 回 415）
+- **LINE 檔案上傳支援的副檔名**：`.pdf .doc .docx .xls .xlsx .jpg .jpeg .png .zip`（白名單，其他類型 `/line-download-content` 回 415）。`.zip` 為**只轉寄 mail、不入庫**類型（`api_server.NON_INGEST_EXTS`），`/ingest-file` 會 graceful skip 並回 `skipped:true`，檔案移至 `processed/ZIP/`
 - **n8n switch v3 最多 5 outputs**：file_upload 改用獨立 IF (`Route File Upload`) 在 Intent Switch 之前分流
 
 ---
