@@ -166,6 +166,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._handle_line_download_content(data)
             elif self.path == "/forward-mail":
                 self._handle_forward_mail(data)
+            elif self.path == "/notify":
+                self._handle_notify(data)
             else:
                 self.send_json(404, {"error": "Not found"})
         except Exception as e:
@@ -724,6 +726,59 @@ class APIHandler(BaseHTTPRequestHandler):
     # Base64 inflates by ~33%, so 18MB raw → ~24MB encoded, leaving 1MB headroom for headers/body.
     MAIL_BATCH_MAX_BYTES = 18 * 1024 * 1024
 
+    def _handle_notify(self, data: dict):
+        """POST /notify {subject?, message, to?} -> {success}
+
+        Sends a plain-text alert email (no attachment) via the same SMTP config
+        as /forward-mail. Used to surface failures that would otherwise be silent:
+          - the n8n Error Workflow (node-level errors that fire errorTrigger)
+          - the n8n log watchdog (webhook intake-level drops that save no execution)
+        Recipient defaults to ALERT_MAIL_TO, falling back to FORWARD_MAIL_TO.
+        """
+        import smtplib
+        import ssl
+        from email.message import EmailMessage
+
+        smtp_host = os.environ.get("SMTP_HOST", "smtp.gmail.com").strip()
+        smtp_port = int(os.environ.get("SMTP_PORT", "587"))
+        smtp_user = os.environ.get("SMTP_USER", "").strip()
+        smtp_password = os.environ.get("SMTP_PASSWORD", "").strip()
+        default_to = (os.environ.get("ALERT_MAIL_TO", "").strip()
+                      or os.environ.get("FORWARD_MAIL_TO", "").strip())
+
+        if not smtp_user or not smtp_password:
+            self.send_json(500, {"error": "SMTP_USER / SMTP_PASSWORD not set in .env"})
+            return
+
+        recipient = str(data.get("to", "")).strip() or default_to
+        if not recipient:
+            self.send_json(400, {"error": "No recipient (set ALERT_MAIL_TO/FORWARD_MAIL_TO or pass `to`)"})
+            return
+
+        subject = str(data.get("subject", "")).strip() or "[AI-QA] 系統告警"
+        message = str(data.get("message", "")).strip() or "(no message body)"
+
+        m = EmailMessage()
+        m["From"] = smtp_user
+        m["To"] = recipient
+        m["Subject"] = subject
+        m.set_content(message)
+
+        try:
+            ctx = ssl.create_default_context()
+            with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.ehlo()
+                server.login(smtp_user, smtp_password)
+                server.send_message(m)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.send_json(502, {"success": False, "error": f"SMTP failed: {e}"})
+            return
+
+        self.send_json(200, {"success": True, "to": recipient, "subject": subject})
+
     def _handle_forward_mail(self, data: dict):
         """POST /forward-mail {file_path | file_paths, subject?, body?, to?} -> {success, ...}
 
@@ -907,7 +962,7 @@ def main():
     server = ThreadingHTTPServer((args.host, args.port), APIHandler)
     server.daemon_threads = True
     sys.stderr.write(f"[api_server] Listening on http://{args.host}:{args.port}\n")
-    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db /line-download-content /forward-mail\n")
+    sys.stderr.write(f"[api_server] Endpoints: GET /health /list-inbox /files/<name>  POST /line-verify /vector-search /prompt-builder /search-files /ingest-file /backup-db /line-download-content /forward-mail /notify\n")
     sys.stderr.flush()
     try:
         server.serve_forever()

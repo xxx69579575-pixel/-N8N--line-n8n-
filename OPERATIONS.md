@@ -219,3 +219,38 @@ n8n CLI 已經夠用，發新 key 是「之後想用 REST API 自動化推送」
 6. **看 n8n 執行紀錄**：瀏覽器開 `http://localhost:5681` → 左欄 **Executions** → 找 `LINE QA Assistant` 最近的執行 → 點開看哪個 node 紅了
 7. **看 api_server stderr**：`Get-Content "$env:LOCALAPPDATA\ai-qa-startup\api_server.log" -Tail 50`
 8. **看 LINE Developers Console** → 你的 Bot → Messaging API → Webhook URL 還是不是那串穩定網址？按 **Verify** 應回 Success
+9. **webhook intake 層級掉訊息（Executions 看不到、執行紀錄為零）**：
+   - 症狀：LINE 有送進來但 n8n 沒有對應 execution、使用者也沒收到回覆。
+   - 確認：`docker logs ai-qa-n8n | Select-String "Error in handling webhook request"`，
+     或看 ngrok 側錄 `http://localhost:4040/api/requests/http`，LINE 那筆 upstream 狀態若為 `0` 即是。
+   - 成因：n8n 在「啟動執行」最前端瞬間失敗（多為主機 I/O/CPU 卡頓時 sqlite 寫入失敗）。
+     此類失敗**不會觸發 errorTrigger、不存 execution、不回覆**，且 **LINE 不重送 → 檔案/提問遺失**。
+   - 補救：請對方**重傳**（LINE 端內容有下載期限，逾期就拿不回）。
+   - 偵測：已由排程任務 `AI-QA-n8n-LogWatchdog`（每 5 分鐘）掃 log，命中即寄告警到 `ALERT_MAIL_TO`。
+
+---
+
+## 變更紀錄：掉訊息偵測 + 錯誤通知修復（2026-06-29）
+
+**背景**：2026-06-29 10:02 一則 LINE 檔案上傳因 n8n intake 層級瞬間失敗被靜默丟棄（全 log 史上僅此 1 次），
+使用者毫無感知。基礎設施全程健康，根因為一次性瞬斷 + 兩條告警鏈本來就是斷的。
+
+**修正項目**：
+1. **新增 `/notify` 端點**（`scripts/api_server.py`）：寄純文字告警信，收件人 `ALERT_MAIL_TO`（未設則 fallback `FORWARD_MAIL_TO`）。
+2. **新增掉訊息 watchdog**（`scripts/watchdog_n8n_log.ps1` + `watchdog_n8n_launch.vbs`）：
+   排程任務 `AI-QA-n8n-LogWatchdog` 每 5 分鐘掃 `docker logs ai-qa-n8n` 的
+   `Error in handling webhook request`，命中即 POST `/notify` 告警。冪等（state 檔記檢查點，不重複告警）。
+3. **修 Error Workflow 通知目標**（n8n `hAz6zL8XtCTWyQ1D`）：
+   HTTP 節點原本 POST 到 `host.docker.internal:8080/webhook/n8n-error`（**該 port 無人聽，通知進黑洞**），
+   改為 `host.docker.internal:8765/notify`；body 改用正確 errorTrigger 欄位
+   （`$json.workflow.name`、`$json.execution.error.message`、`$json.execution.id`、`$json.execution.lastNodeExecuted`），
+   並加 `onError=continueRegularOutput` 防止告警自身失敗時連鎖。
+4. **新增 `.env`：`ALERT_MAIL_TO`**（系統告警收件人，預設管理者本人）。
+
+**兩條告警鏈的分工**：
+- 排程 watchdog → 抓 **intake 層級**靜默掉訊息（不觸發 errorTrigger 的那種）。
+- Error Workflow → 抓 **節點層級**錯誤（會觸發 errorTrigger、有存 execution 的那種）。
+
+**待辦（未做，需決策）**：
+- n8n DB 由 sqlite 遷移到 PostgreSQL（降低 intake 寫入失敗機率；屬有停機與資料風險的變更）。
+- 主機 `Group Policy Client (gpsvc)` 服務每 5 分鐘啟動逾時（每天 ~125 次）— Windows OS 層問題，需管理員權限修復。
