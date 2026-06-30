@@ -2,7 +2,7 @@
 
 本專案的「運行手冊 + 變更紀錄」。每次系統有功能新增、bug 修正、或架構調整，**追加**到「變更紀錄」最上方並更新「系統架構」相關章節。
 
-最後更新：2026-06-23
+最後更新：2026-06-30
 
 ---
 
@@ -69,6 +69,18 @@ D:\智能助理資料庫自動備份\
 ---
 
 ## 變更紀錄
+
+### 2026-06-30 — 清理重複的開機排程（消除重開機後殘留的錯誤視窗）
+- **症狀**：重開機後桌面留下兩個沒自動關的命令視窗報錯 —— ① ngrok 視窗 `ERROR: Tunnel 'api-server' is not defined in the config files`；② api_server 視窗顯示 `'CLAUDE' 不是內部或外部命令`。但所有服務其實都正常運行。
+- **根本原因**：登入時有**三個**排程同時觸發，其中兩個是改用 `start_all.ps1` + watchdog 架構之前的**舊版殘留**，現已與新架構重複且部分失效：
+  1. `AI_Ngrok`（LastResult=1）→ `start_ngrok_bg.bat` / `start_ngrok.bat` 仍跑 `ngrok start api-server`，但 api_server 早已改走 cloudflared、`ngrok.yml` 只剩 `n8n` tunnel → 報 "tunnel not defined"。
+  2. `AI_ApiServer`（LastResult=1）→ `start_api_server_bg.bat` 想再起第二個 api_server，8765 已被佔用 → 失敗。
+  - 真正在運作的是 `AI-QA-Assistant-Startup`（→ `start_all.ps1`，LastResult=0）+ `AI_ApiServer_Watchdog` + `AI-QA-n8n-LogWatchdog`。
+- **改動**：
+  - 以系統管理員權限 `schtasks /Change /DISABLE` 停用 `AI_ApiServer`、`AI_Ngrok`（**只停用、未刪除**，可隨時還原）。
+  - 刪除已無用途的殘留腳本：`start_ngrok.bat`、`start_ngrok_bg.bat`、`start_api_server_bg.bat`。
+- **驗證**：停用後全鏈路重測皆綠 —— api_server `/health` 200、n8n `/healthz` 200、Ollama 200、cloudflared 對外 `/health` 200、ngrok LINE webhook 200；watchdog.log 心跳正常（每 30 分 `OK 8765 listening`）；ngrok 程序僅一個跑 `start n8n`（正確）。
+- **備註**：開機自動化與自癒一律交由 `AI-QA-Assistant-Startup` + 兩支 watchdog 負責，不再有重複任務或殘留錯誤視窗。
 
 ### 2026-06-23 — 修復 PDF OCR 在 `pythonw.exe` 下卡死（multiprocessing 死鎖）
 - **症狀**：整台電腦持續轉圈圈變鈍。查出 `api_server.py`（PID 1920）對同一個 `金泳公司章程.pdf` 在 16:32 / 17:03 / 18:03 重複觸發 3 次文字擷取，每次都卡死沒結束（各跑 46 分～2 小時17分、CPU 只耗 123～384 秒＝**阻塞而非運算**），每棵各自又開了 multiprocessing 子程序在背景空轉吃 CPU。
