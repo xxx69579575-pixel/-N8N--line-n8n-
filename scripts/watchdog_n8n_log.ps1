@@ -38,6 +38,29 @@ function Send-Alert($subject, $message) {
         -ContentType 'application/json; charset=utf-8' -TimeoutSec 35 | Out-Null
 }
 
+# PowerShell 5.1 對「原生 exe」用 2>&1 時，stderr 的每一行都會被包成 ErrorRecord。
+# 本腳本開頭是 $ErrorActionPreference='Stop'，於是那些 ErrorRecord 變成終止錯誤，
+# 直接跳進最外層 catch —— 而 n8n 的日誌「全部」走 stderr（連 DEP0040 warning 也是），
+# 所以第一行就會炸掉，永遠走不到推進 state 檔那行。
+# 2026-06-29 ~ 2026-09-01 期間本 watchdog 因此完全失效（log: OK 0 筆 / ERROR 8630 筆）。
+# 修法：只在這個呼叫內把 EAP 降為 Continue，並把 ErrorRecord 攤平回字串；
+# 真正的失敗改用 $LASTEXITCODE 判斷（容器不存在、docker 沒起來等）。
+function Get-ContainerLogLines($since) {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $raw = & docker logs --since $since -t $container 2>&1
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $prevEAP
+    }
+    if ($code -ne 0) { throw "docker logs 失敗 (exit $code)：容器 '$container' 可能不存在或 Docker 未啟動" }
+    return @($raw | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.ToString() } else { [string]$_ }
+    })
+}
+
+
 try {
     # 掃描起點：上次檢查點；首次執行則回看 15 分鐘（避免漏掉剛發生的）
     $nowUtc = (Get-Date).ToUniversalTime()
@@ -47,9 +70,19 @@ try {
         $since = $nowUtc.AddMinutes(-15).ToString('yyyy-MM-ddTHH:mm:ssZ')
     }
 
-    # docker logs --since 取自 $since 之後、含時間戳。stderr 也含日誌，2>&1 合併。
-    $lines = & docker logs --since $since -t $container 2>&1 |
-             Select-String -Pattern $pattern -SimpleMatch
+    # 防禦：檢查點若過舊（watchdog 曾長時間失效／機器關機多日），最多只回看 60 分鐘。
+    # 否則一次掃進數週日誌，既慢又會對早已過期的事件洗版告警。
+    $maxLookback = $nowUtc.AddMinutes(-60)
+    $parsedSince = [datetime]::MinValue
+    $sinceOk = [datetime]::TryParse($since, [ref]$parsedSince)
+    if ((-not $sinceOk) -or ($parsedSince.ToUniversalTime() -lt $maxLookback)) {
+        Write-Log "WARN  檢查點 '$since' 過舊或無法解析，截斷為回看 60 分鐘"
+        $since = $maxLookback.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+
+    # docker logs --since 取自 $since 之後、含時間戳。n8n 日誌走 stderr，
+    # 由 Get-ContainerLogLines 安全合併（見上方註解）。
+    $lines = @(Get-ContainerLogLines $since | Select-String -Pattern $pattern -SimpleMatch)
 
     $checkpoint = $nowUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
 

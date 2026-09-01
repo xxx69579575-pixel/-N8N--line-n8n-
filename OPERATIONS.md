@@ -70,6 +70,124 @@ D:\智能助理資料庫自動備份\
 
 ## 變更紀錄
 
+### 2026-09-01 — Ollama 模型遭刪除（系統壞了 25 小時無人察覺）+ Docker port-forward 衝突連帶修復
+- **觸發**：LINE 上傳 `在建工程明細表20260422.xlsx` 後回覆「✉ 已轉寄成功，⚠️ 知識庫匯入失敗」，錯誤為 `Ollama HTTP 404: model "bge-m3" not found, try pulling it first`。
+
+#### 問題一：Ollama 模型全數遭刪除
+- **實況比回報更嚴重**：`/api/tags` 回傳 **0 個模型** —— 不只 `bge-m3`，連 `qwen2.5:7b-instruct-q4_0` 也不見了，等於**問答與匯入雙雙失效**。`~/.ollama/models/blobs` 與 `manifests` 皆空，整個目錄只剩 12K，mtime 停在 **2026-08-31 08:51**。
+- **根本原因（決定性證據）**：`%LOCALAPPDATA%\Ollama\server.log` 記錄
+  ```
+  2026/08/31 - 08:51:19 | 200 | DELETE "/api/delete"   ← 127.0.0.1
+  2026/08/31 - 08:51:19 | 200 | DELETE "/api/delete"
+  2026/08/31 - 08:51:20 | 200 | DELETE "/api/delete"
+  2026/08/31 - 08:51:20 | 200 | DELETE "/api/delete"
+  ```
+  一秒內 4 次來自本機的**明確刪除呼叫**（`ollama rm` 打的就是這個端點），全部回 200。**不是**崩潰、磁碟清理或自動更新：磁碟 C 尚餘 260GB；`app.log` 顯示 08:41／09:41 只有例行更新檢查（v0.33.2 已下載但未安裝），08:51 沒有 Ollama 自身活動。
+- **無法確定執行者**：專案內 grep 不到任何 `ollama rm` / `api/delete` 的程式碼；PowerShell 歷史只有一筆舊的 `ollama pull bge-m3`。刪除可能來自其他 shell（cmd／Git Bash／WSL 不寫入 PSReadline 歷史）或 Ollama GUI。**能確定「是什麼」，不能確定「是誰」。**
+- **順帶解開 8/31 09:00 的懸案**：該次 `GET: List Inbox Files` 卡 12.9 秒而逾時（見上方該筆），時間點正好落在 08:51 刪除約 6GB 模型檔之後 —— 大量刪除 I/O 拖慢了磁碟，這是先前查不出來源的那 12.9 秒最合理的解釋。
+- **修復**：`ollama pull bge-m3`（1.16GB）、`ollama pull qwen2.5:7b-instruct-q4_0`（4.43GB）。
+
+#### 問題二：Windows → PostgreSQL 的 port-forward 壞掉（補模型後才浮現）
+- **現象**：模型補回後重跑匯入，extract／chunk／embed 全過，卻卡在 `write_to_db failed`。從 Windows 連 PG **三種寫法全失敗**：`localhost`（解析為 `::1`）、`::1`、`127.0.0.1`，錯誤為 `could not receive data from server: Software caused connection abort (10053)` 與 `server closed the connection unexpectedly` —— TCP 建得起來，但協定握手就被斷。
+- **PostgreSQL 本身完全健康**：容器內 `psql` 與同 docker 網路的臨時容器都查得到 215 筆 documents。
+- **根本原因（PID 級證據）**：`netstat` 顯示 **兩個程序同時綁 65432**
+  | PID | 程序 | 綁定 | 啟動時間 |
+  |-----|------|------|----------|
+  | 52464 | `com.docker.backend` | `0.0.0.0:65432` + `[::]:65432` | **8/27 16:43** |
+  | 43656 | `wslrelay.exe` (`--vm-id {3433a8a9-…}`) | `[::1]:65432` | **8/31 11:31:16** |
+  `8/31 11:31` WSL VM 重啟後新起的 `wslrelay` 搶綁了 IPv6 loopback，而 Docker 的 forwarder 仍是 8/27 的舊程序、沒跟著 VM 重啟 → 兩者打架，轉發失效。（vm-id `3433a8a9` 正是當初在 Hyper-V VmSwitch 事件中看到的那個 NIC。）
+- **這同時就是 n8n `Connection terminated unexpectedly` 的源頭**，時間完全吻合；先前把 n8n 改為直連 docker 內部網路（見上一筆），正好繞開了這個衝突，所以那條路徑修完即穩。
+- **修復**：`docker restart pg_container` —— 讓 Docker 重建該 port 的 forwarding。重啟後 `127.0.0.1` 與 `localhost` 立即恢復正常。**注意**：`wslrelay` 仍綁著 `[::1]:65432`，衝突的結構還在，**下次 WSL VM 重啟後可能重演**（判斷方式見下方「排查」）。
+- **api_server 為何不能比照 n8n 直連**：它跑在 Windows 上、不是容器，走不了 docker 內部網路，只能經由 port mapping，因此仍暴露在這個衝突下。
+
+#### 驗證（全綠）
+- 模型：`/api/tags` 回 `bge-m3:latest` 1.16GB + `qwen2.5:7b-instruct-q4_0` 4.43GB；`bge-m3` 實測輸出 **1024 維**（與 schema `VECTOR(1024)` 相符）；`qwen2.5` 生成正常（以 UTF-8 送中文 prompt 回答正確）。
+- 檔案重跑：`在建工程明細表20260422.xlsx` 由 `error/EXCEL/` 移回 inbox 後重新 ingest → `success=True, chunk_count=3`；DB 確認 `ingest_status=done`、3 chunks、`dims=1024`。
+- 端到端：`POST /vector-search`（此路徑正好經過剛修好的 `localhost:65432`）以「在建工程明細表的內容是什麼？」檢索 → 命中 3 筆，最高相似度 **0.6949**，Top-1 即該檔。
+- **error 資料夾盤點**：共 37 個檔案，其中**只有 1 個是今天的**（即本次 xlsx），其餘 36 個為 4～7 月的舊失敗，與本次事故無關，未一併處理。
+
+#### 監控缺口（尚未處理，建議補）
+- 模型自 `8/31 08:51` 消失，直到 `9/1 09:41` 使用者上傳檔案才被發現 —— **系統壞了約 25 小時，零告警**。
+- 現有 `watchdog_api.ps1` 只檢查 8765 是否 listening，**不檢查 Ollama 模型是否存在、也不檢查 api_server 能否連上 PG**。這兩者任一失效都會讓系統靜默失能。
+- 建議在 watchdog 增加：① `GET /api/tags` 確認 `bge-m3` 與 `qwen2.5:7b-instruct-q4_0` 都在；② 從 Windows 實際連一次 PG。任一失敗即透過既有 `/notify` 告警。
+
+#### 排查：疑似又是 port-forward 衝突時
+```powershell
+netstat -ano | findstr ":65432"        # 若有兩個不同 PID 在綁，即為此問題
+Get-Process -Id <PID> | Select ProcessName,StartTime
+docker restart pg_container            # 修法：讓 Docker 重建 forwarding
+```
+
+### 2026-09-01 — 修復「掉訊息偵測」watchdog：部署第一天起就沒運作過（失效 64 天）
+- **發現經過**：追查 8/31 ingest 告警時，順手確認「為什麼 8/28、8/30、8/31 連三次 n8n crash 都沒告警」，才發現這支 watchdog 早已死亡。
+- **證據**：
+  - `logs/watchdog_n8n.state` 停在 `2026-06-29T02:47:02Z`，**兩個月未更新**（檔案 mtime 也停在 6/29）。
+  - `logs/watchdog_n8n.log`：**OK 0 筆 / ERROR 8630 筆** —— 每 5 分鐘失敗一次，連續失敗到 9/1，8630 行全是同一則假錯誤。
+- **根本原因（PowerShell 5.1 的原生 exe stderr 陷阱）**：
+  - 腳本開頭 `$ErrorActionPreference = 'Stop'`，而取日誌那行用 `& docker logs ... 2>&1`。
+  - PS 5.1 對**原生 exe** 用 `2>&1` 時，stderr 每一行都會被包成 `ErrorRecord`；配上 EAP=Stop 就成為終止錯誤，直接跳進最外層 `catch`。
+  - **n8n 的日誌全部走 stderr**（連 `DEP0040 punycode` warning 也是），所以第一行就炸 → 永遠執行不到結尾的 `Set-Content $stateFile`。
+  - 檢查點因此永遠卡在 6/29，每次 `docker logs --since` 都從 6/29 撈起，第一行 stderr 又立刻炸 —— 形成自我維持的死迴圈。
+- **第二層盲點：排程的 `LastResult` 不可信**。`AI-QA-n8n-LogWatchdog` 執行的是 `wscript.exe watchdog_n8n_launch.vbs`，而 vbs 用 `shell.Run cmd, 0, False`（**非同步、不等待**），wscript 立刻結束回 0。所以 Task Scheduler 的 `LastResult` **恆為 0**，與 ps1 實際成敗無關 —— 這是連續失敗兩個月卻無人察覺的直接原因。
+  - **判斷 watchdog 健康請一律看 `logs/watchdog_n8n.log` 是否持續出現 `OK`，不要看排程面板的 LastResult。**
+- **改動**（`scripts/watchdog_n8n_log.ps1`）：
+  - 新增 `Get-ContainerLogLines`：只在該呼叫內把 EAP 降為 `Continue`，把 `ErrorRecord` 攤平回字串，真正的失敗改用 `$LASTEXITCODE` 判斷（容器不存在／Docker 未啟動）。
+  - 新增檢查點過舊保護：`$since` 若無法解析或早於 60 分鐘前，記 `WARN` 並截斷為回看 60 分鐘 —— 避免 watchdog 曾長期失效後，一次掃進數週日誌並對早已過期的事件洗版告警。
+  - 舊的 8630 行垃圾日誌歸檔為 `logs/watchdog_n8n.log.broken-2026-06-29_2026-09-01`（保留證據）。
+- **驗證**（四段全綠）：
+  1. 手動執行 → `exit 0`（先前恆為 1）；log 出現兩個月來第一筆 `OK`，且正確印出 `WARN 檢查點過舊 → 截斷 60 分鐘`。
+  2. 再執行一次 → 無 WARN，區間 `01:22:52 ~ 01:23:05` 精確銜接前次檢查點，無縫也無重疊。
+  3. **告警路徑乾跑**：複製一份改 `$pattern` 為 `Initializing n8n process`（容器內確定存在）、`Send-Alert` 改為輸出不寄信 → 成功命中 1 筆並完整組出告警內容（主旨、掃描區間、原始日誌行、排查指令）。證明「偵測 → 組裝 → 告警」整條路徑可用，不只是「不再報錯」。
+  4. **端到端**：等排程於 `09:27:01` 自動觸發 → log 寫入 `OK`，state 由 `01:23:05` 銜接至 `01:27:01`。
+- **未動**：`watchdog_n8n_launch.vbs` 維持非同步啟動（改同步會有排程重疊風險，且當初就是為了消除命令視窗閃爍，見 2026-06-30 該筆）。
+
+### 2026-09-01 — 修復文件匯入流程偶發告警：`GET: List Inbox Files` timeout 太短且無重試
+- **症狀**：收到告警 `Enterprise Doc Ingest v2 / 執行ID 4238 / 最後節點 GET: List Inbox Files / The connection was aborted, perhaps the server is offline`。
+- **排查結果：api_server 從頭到尾都活著，不是「server offline」**。
+  - `logs/watchdog.log` 顯示 `pid=6492` 在 08:46 與 09:16 兩次心跳皆 `OK 8765 listening`，中間沒重啟過；`logs/api_server.err.log` 也沒有任何 traceback。
+  - n8n event log（`/home/node/.n8n/n8nEventLog*.log`）顯示執行 4238 於 `2026-08-31T09:00:24` 開始、`09:00:37` 失敗 —— **卡了 12.9 秒**。
+- **已排除「Docker 被重整/暫停」**（曾懷疑此因，實際查證後不成立）：
+  - Hyper-V VmSwitch 事件顯示 WSL VM 的 NIC delete→create（= Docker VM 整個重啟）只發生在 **8/30 13:11** 與 **8/31 11:31**，兩次都對應 n8n 的 `Last session crashed`。事故（8/31 09:00）落在兩次之間，該區段 VmSwitch **完全沒有事件**，網路層連續穩定。
+  - Windows 事件記錄無任何 Kernel-Power 41/42/107 → 電腦沒睡眠、沒當機、沒重開機。
+  - 結論：8/31 11:31 的 Docker 重啟發生在事故**之後 2.5 小時**，是後續現象而非成因。
+- **根本原因**：`GET: List Inbox Files` 節點 `options.timeout` 設 **10000ms**，該次呼叫實際耗時超過 10 秒（確切來源日誌未留痕跡，無法定位） → n8n 主動中斷連線，並把 timeout 一律回報成 "The connection was aborted, perhaps the server is offline"（誤導性訊息）。節點又**沒有任何重試**，單次瞬斷就讓整條流程失敗並發告警。
+- **改動**（`workflows/ingest_workflow_v2.json` 的 `GET: List Inbox Files`）：
+  - `options.timeout`：`10000` → `60000`（掃本機資料夾給足餘裕）
+  - 新增 `retryOnFail: true`、`maxTries: 3`、`waitBetweenTries: 5000`（純讀取、冪等，重試安全）
+  - **未動 `POST: Ingest File`**：該節點有寫 DB／移檔副作用，不加自動重試；且它失敗已由 `IF: Success?` 分支處理，不會中斷整批。
+- **驗證**：改檔前先 `n8n export:workflow` 比對線上版與 repo 版（10 個節點、參數 0 差異）才覆蓋。匯入後 `export` 回讀確認 `active=True`、`timeout=60000`、`retryOnFail=True`、`maxTries=3`；容器內 `wget http://host.docker.internal:8765/list-inbox` 正常回 200。
+- **頻率佐證**：event log 全歷史中，ingest 流程僅 6/23（當時 api_server 未啟動那批）與這次 8/31 失敗過，屬偶發瞬斷，非持續故障。
+- **注意（踩過的坑）**：`n8n import:workflow` 會**自動把該 workflow 停用**（`Deactivating workflow ... Remember to activate later`），必須接著 `n8n update:workflow --id=<id> --active=true` **並重啟容器**才生效（CLI 會提示 `Changes will not take effect if n8n is running`）。
+
+### 2026-09-01 — 根治 `Connection terminated unexpectedly`：n8n 改為直連 PostgreSQL 的 docker 內部網路
+- **症狀**：`LINE QA Assistant` 在最前端的 `Query Session Early` 失敗，錯誤 `Connection terminated unexpectedly` —— **使用者提問被靜默丟棄**。執行 4265（09:05）、4267（09:21）連兩次。
+- **關鍵事實：這是全新問題**。翻遍 n8n 全部 event log，此錯誤**歷史上從未出現過**，只有 9/1 早上這兩筆。
+- **排除 PostgreSQL 端**（完全無辜）：
+  - `idle_session_timeout` / `idle_in_transaction_session_timeout` / `statement_timeout` / `tcp_keepalives_idle` **全為 0（停用）** → PG 不會主動斷線，也不發 keepalive。
+  - 連線數 6 / max_connections 100，毫無壓力；`docker logs pg_container --since 12h` **一行輸出都沒有**。
+- **根本原因：連線繞了一大圈，中間層回收閒置 TCP**。
+  - n8n 與 PostgreSQL 分屬**兩個不同的 compose project、兩個不同的 docker 網路**：
+    - `ai-qa-n8n` → `docker_n8n_default`（172.22.0.2）
+    - `pg_container` → `docker_postgresql_default`（172.21.0.2）
+  - 因此 n8n 只能靠 credential 裡的 `host.docker.internal:65432` 連線 —— 路徑是「n8n 容器 → Docker NAT → Windows host port-forward → Docker NAT → pg 容器」。
+  - **該 port-forward 層當時是壞的**（後續在排查 Ollama 事故時才查出精確機制，見下一筆）：`8/31 11:31` WSL VM 重啟後新起的 `wslrelay.exe`（PID 43656，vm-id `{3433a8a9-…}`）搶綁了 `[::1]:65432`，而 Docker 的 `com.docker.backend`（PID 52464）仍是 `8/27 16:43` 啟動的舊程序、沒跟著 VM 重啟 —— 兩個 forwarder 同時綁同一個 port，轉發行為變得不確定，連線在協定握手階段被斷。
+  - 因此 n8n 的 pg pool 取用連線時拿到已被中間層斷掉的死連線 → `Connection terminated unexpectedly`。時間也完全吻合（wslrelay 起於 8/31 11:31，首次故障 9/1 09:05）。
+- **修法：讓兩者直連，整段中間層直接消失**。
+  1. `docker_n8n/docker-compose.yml`：加入 external network `docker_postgresql_default`（`networks: [default, pgnet]`），使網路連接由 compose 管理而非臨時 `docker network connect`（後者容器一重建就沒了）。
+  2. n8n credential `PostgreSQL vectordb`：`host.docker.internal:65432` → **`db:5432`**（`db` 是 pg_container 的 compose service name / hostname alias）。以 `n8n export:credentials --decrypted` → 改 → `import:credentials` 完成，全程在容器內操作，避免其他憑證外流。
+  3. compose 的 `POSTGRES_HOST` / `POSTGRES_PORT` 環境變數同步改為 `db` / `5432`。
+  4. **第二層保險**：`qa_workflow.json` 的兩個唯讀節點 `Query Session Early`、`Query allowed_users` 加上 `retryOnFail: true / maxTries: 3 / waitBetweenTries: 3000`。
+- **刻意不動**：`Insert qa_logs`、`Log Error` 是純 `INSERT`，自動重試會產生重複列，不加。（`conversation_sessions` 那幾個雖是 `ON CONFLICT` upsert、本身冪等，但根因已除、retry 只是保險，故一併維持原狀。）
+- **不影響的部分**：`api_server.py` 跑在 Windows 上，仍走 `localhost:65432`（compose 的 `65432:5432` port mapping 保留）；n8n 對 api_server（8765）與 Ollama（11434）仍走 `host.docker.internal`，因為那兩者不是容器。
+- **驗證**（逐層，全綠）：
+  1. 先用 `docker network connect` 臨時接上測試 → `db:5432` / `pg_container:5432` TCP 皆通。
+  2. `pg_hba.conf` 為 `host all all all trust`、`listen_addresses = *` → 新來源會被接受。
+  3. **協定層**：從該網路起一個臨時 `ankane/pgvector` 容器 `psql -h db` → 認證成功，查得 `conversation_sessions`。
+  4. 改 compose 後 `docker compose up -d` 重建 → 容器確實同時掛在兩個網路（172.22.0.2 + 172.21.0.4），證明設定已持久化。
+  5. 回讀確認 credential 為 `db:5432`、workflow `active=True` 且兩節點 retry 已生效。
+  6. **端到端**：自行以 `LINE_CHANNEL_SECRET` 計算 HMAC-SHA256 簽章，送一筆**未授權 user id** 的合法 webhook（`Check Auth` 對未授權者是 `return null`，流程正常結束、不觸發告警；對 LINE 的請求帶無效 replyToken 必被拒且被 `catch` 吞掉，**不會有訊息送給任何人**）→ webhook 回 **HTTP 200**；執行 4269 的 `Query Session Early` **23ms 內完成**；`pg_stat_activity.client_addr` 顯示 **172.21.0.4**（n8n 在 pg 網路的 IP），**證明連線確實走內部網路直連，不再經過 host.docker.internal**。
+- **注意**：`import:workflow` 一樣會自動停用 workflow，需 `update:workflow --active=true` 並重啟；本次與 compose 重建合併為一次生效。
+
 ### 2026-06-30 — 清理重複的開機排程（消除重開機後殘留的錯誤視窗）
 - **症狀**：重開機後桌面留下兩個沒自動關的命令視窗報錯 —— ① ngrok 視窗 `ERROR: Tunnel 'api-server' is not defined in the config files`；② api_server 視窗顯示 `'CLAUDE' 不是內部或外部命令`。但所有服務其實都正常運行。
 - **根本原因**：登入時有**三個**排程同時觸發，其中兩個是改用 `start_all.ps1` + watchdog 架構之前的**舊版殘留**，現已與新架構重複且部分失效：

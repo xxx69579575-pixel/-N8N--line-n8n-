@@ -20,9 +20,9 @@ services:
       # Ollama — host machine
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_CHAT_MODEL=qwen2.5:7b-instruct-q4_0
-      # PostgreSQL — host machine (pg_container port 65432)
-      - POSTGRES_HOST=host.docker.internal
-      - POSTGRES_PORT=65432
+      # PostgreSQL — 直連 docker 內部網路（見檔案下方 networks 說明）
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
       - POSTGRES_DB=vectordb
       - POSTGRES_USER=testuser
       - POSTGRES_PASSWORD=testpwd
@@ -31,6 +31,19 @@ services:
       - D:/n8n/CLAUDE 實做/本地AI企業問答助理:/workspace
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - pgnet
+
+networks:
+  # PostgreSQL 跑在另一個 compose project（docker_postgresql）。接上它的網路後，
+  # n8n 可用 db:5432 直連；否則只能繞 host.docker.internal:65432，
+  # 走 Docker Desktop 的 port-forward —— 該層會回收閒置 TCP 連線，
+  # 導致 n8n 的 pg pool 重用到死連線並拋 "Connection terminated unexpectedly"
+  # （2026-09-01 執行 4265 / 4267 即此因）。
+  pgnet:
+    name: docker_postgresql_default
+    external: true
 
 volumes:
   n8n_data:
