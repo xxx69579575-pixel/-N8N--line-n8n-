@@ -116,7 +116,10 @@
           "name": "PostgreSQL vectordb"
         }
       },
-      "notes": "Reads turns + mode from conversation_sessions early (before intent routing). UNION ALL guarantees exactly 1 row even if user has no session yet."
+      "notes": "Reads turns + mode from conversation_sessions early (before intent routing). UNION ALL guarantees exactly 1 row even if user has no session yet.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     },
     {
       "id": "qa-node-021",
@@ -152,7 +155,10 @@
           "name": "PostgreSQL vectordb"
         }
       },
-      "notes": "Always returns 1 row with {authorized: true/false}. Runs for all intents before branching."
+      "notes": "Always returns 1 row with {authorized: true/false}. Runs for all intents before branching.",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
     },
     {
       "id": "qa-node-009",

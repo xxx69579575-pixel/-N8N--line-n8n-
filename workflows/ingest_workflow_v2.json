@@ -1,4 +1,5 @@
 {
+  "id": "ow2BRQJ0NwBUo1BM",
   "name": "Enterprise Doc Ingest v2",
   "nodes": [
     {
@@ -6,7 +7,10 @@
       "name": "Schedule Trigger",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [200, 300],
+      "position": [
+        200,
+        300
+      ],
       "parameters": {
         "rule": {
           "interval": [
@@ -24,7 +28,10 @@
       "name": "Manual Trigger",
       "type": "n8n-nodes-base.manualTrigger",
       "typeVersion": 1,
-      "position": [200, 480],
+      "position": [
+        200,
+        480
+      ],
       "parameters": {},
       "notes": "手動測試用：點 Execute Workflow 立即執行"
     },
@@ -33,24 +40,33 @@
       "name": "GET: List Inbox Files",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [460, 300],
+      "position": [
+        460,
+        300
+      ],
       "parameters": {
         "method": "GET",
         "url": "http://host.docker.internal:8765/list-inbox",
         "sendHeaders": false,
         "sendBody": false,
         "options": {
-          "timeout": 10000
+          "timeout": 60000
         }
       },
-      "notes": "呼叫 api_server GET /list-inbox\n回傳 {files:[{file_name,file_path,file_ext,file_size}], count:N}\n需設定環境變數 INGEST_INBOX_DIR"
+      "notes": "呼叫 api_server GET /list-inbox\n回傳 {files:[{file_name,file_path,file_ext,file_size}], count:N}\n需設定環境變數 INGEST_INBOX_DIR",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
     },
     {
       "id": "ingest-node-003",
       "name": "IF: Has Files",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [700, 300],
+      "position": [
+        700,
+        300
+      ],
       "parameters": {
         "conditions": {
           "options": {
@@ -80,7 +96,10 @@
       "name": "Split: One File Per Item",
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
-      "position": [940, 220],
+      "position": [
+        940,
+        220
+      ],
       "parameters": {
         "fieldToSplitOut": "files",
         "options": {}
@@ -92,7 +111,10 @@
       "name": "POST: Ingest File",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1180, 220],
+      "position": [
+        1180,
+        220
+      ],
       "parameters": {
         "method": "POST",
         "url": "http://host.docker.internal:8765/ingest-file",
@@ -112,7 +134,10 @@
       "name": "IF: Success?",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2,
-      "position": [1420, 220],
+      "position": [
+        1420,
+        220
+      ],
       "parameters": {
         "conditions": {
           "options": {
@@ -142,7 +167,10 @@
       "name": "Set: Log Success",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [1660, 120],
+      "position": [
+        1660,
+        120
+      ],
       "parameters": {
         "mode": "manual",
         "duplicateItem": false,
@@ -183,7 +211,10 @@
       "name": "Set: Log Error",
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
-      "position": [1660, 340],
+      "position": [
+        1660,
+        340
+      ],
       "parameters": {
         "mode": "manual",
         "duplicateItem": false,
@@ -224,7 +255,10 @@
       "name": "No Files to Process",
       "type": "n8n-nodes-base.noOp",
       "typeVersion": 1,
-      "position": [940, 420],
+      "position": [
+        940,
+        420
+      ],
       "parameters": {},
       "notes": "收件匣為空，本次無需處理"
     }
@@ -232,39 +266,93 @@
   "connections": {
     "Schedule Trigger": {
       "main": [
-        [{"node": "GET: List Inbox Files", "type": "main", "index": 0}]
+        [
+          {
+            "node": "GET: List Inbox Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Manual Trigger": {
       "main": [
-        [{"node": "GET: List Inbox Files", "type": "main", "index": 0}]
+        [
+          {
+            "node": "GET: List Inbox Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "GET: List Inbox Files": {
       "main": [
-        [{"node": "IF: Has Files", "type": "main", "index": 0}]
+        [
+          {
+            "node": "IF: Has Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "IF: Has Files": {
       "main": [
-        [{"node": "Split: One File Per Item", "type": "main", "index": 0}],
-        [{"node": "No Files to Process", "type": "main", "index": 0}]
+        [
+          {
+            "node": "Split: One File Per Item",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Files to Process",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Split: One File Per Item": {
       "main": [
-        [{"node": "POST: Ingest File", "type": "main", "index": 0}]
+        [
+          {
+            "node": "POST: Ingest File",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "POST: Ingest File": {
       "main": [
-        [{"node": "IF: Success?", "type": "main", "index": 0}]
+        [
+          {
+            "node": "IF: Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "IF: Success?": {
       "main": [
-        [{"node": "Set: Log Success", "type": "main", "index": 0}],
-        [{"node": "Set: Log Error", "type": "main", "index": 0}]
+        [
+          {
+            "node": "Set: Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Set: Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
