@@ -70,6 +70,24 @@ D:\智能助理資料庫自動備份\
 
 ## 變更紀錄
 
+### 2026-09-05 — LINE 檔案上傳全數失敗：Python 不信任 LINE 新憑證鏈（`CERTIFICATE_VERIFY_FAILED`）
+- **觸發**：n8n 執行 **#4373**（`.docx`）與 **#4375**（`.pdf`）於 `11:11` 同時失敗，`Execute: line_download_content` 回 502：
+  `LINE Content API failed: <urlopen error [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate>`
+- **根本原因**：
+  - `api-data.line.me` 的憑證於 `2026-08-14` 換發，簽發鏈改為 `GlobalSign GCC R46 OV TLS CA 2025 → GlobalSign Root R46`。
+  - Windows 上的 Python `ssl` 只信任**已在本機 Windows 憑證存放區**的根憑證，且**不會**觸發 Windows 的「按需下載根憑證」機制；本機 ROOT 存放區沒有任何 GlobalSign 根憑證，所以驗證失敗。
+  - `api.line.me`（Reply API，DigiCert 鏈）不受影響，因此只有「上傳檔案」壞、問答正常。9/1 仍成功是因為 LINE 端逐步切換節點。
+  - 驗證：`openssl s_client` 對同一主機回 `Verify return code: 0`（伺服器有送完整鏈），改用 certifi 的 CA bundle 驗證亦 OK → 純粹是本機信任庫缺根憑證。
+- **改動**（`scripts/api_server.py`）：
+  - 新增 `_https_ssl_context()`：以系統存放區為基底，再疊上 `certifi` 的 Mozilla CA bundle；certifi 不可用時退回系統存放區並印警告。
+  - `/line-download-content` 的 `urlopen` 改帶此 context；`/notify`、`/forward-mail` 兩處 SMTP STARTTLS 也改用同一 helper（Gmail 目前沒問題，預防性統一）。
+- **補救**：修復並重啟 api_server 後，手動以原 `message_id` 重跑三步（下載 → `/forward-mail` 兩檔合寄 → `/ingest-file` 各自入庫），兩份《台灣奇蹟股份有限公司_董事會決議錄_1150905》均已寄出並入庫（各 1 chunk）。**LINE 端未收到回覆**（reply token 已過期），需人工告知使用者。
+- **排查**：若日後再見同類錯誤，先用下列指令判斷是「伺服器鏈不完整」還是「本機缺根憑證」：
+  ```powershell
+  openssl s_client -connect api-data.line.me:443 -servername api-data.line.me -showcerts   # 看 Verify return code 與鏈
+  python -c "import ssl,socket,certifi;ctx=ssl.create_default_context(cafile=certifi.where());ctx.wrap_socket(socket.create_connection(('api-data.line.me',443)),server_hostname='api-data.line.me');print('certifi OK')"
+  ```
+
 ### 2026-09-01 — Ollama 模型遭刪除（系統壞了 25 小時無人察覺）+ Docker port-forward 衝突連帶修復
 - **觸發**：LINE 上傳 `在建工程明細表20260422.xlsx` 後回覆「✉ 已轉寄成功，⚠️ 知識庫匯入失敗」，錯誤為 `Ollama HTTP 404: model "bge-m3" not found, try pulling it first`。
 

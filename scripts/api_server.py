@@ -75,6 +75,26 @@ _load_dotenv(str(_PROJECT_ROOT / "config" / ".env"))
 FILES_BASE_DIR = os.environ.get("FILES_BASE_DIR", "D:/職安")
 
 
+def _https_ssl_context():
+    """SSL context for outbound HTTPS/STARTTLS (LINE Content API, Gmail SMTP).
+
+    Python on Windows only trusts roots already present in the local Windows
+    certificate store; it does NOT trigger Windows' on-demand root download.
+    api-data.line.me switched (2026-08) to a chain ending in "GlobalSign Root R46",
+    which was missing locally -> CERTIFICATE_VERIFY_FAILED (n8n exec 4373/4375).
+    Fix: start from the system store, then add certifi's Mozilla bundle on top.
+    """
+    import ssl
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx.load_verify_locations(cafile=certifi.where())
+    except Exception as e:  # certifi missing/corrupt -> fall back to system store only
+        print(f"[api_server] certifi bundle not loaded ({e}); using system CA store only",
+              file=sys.stderr)
+    return ctx
+
+
 class APIHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):  # noqa: A002
@@ -650,7 +670,7 @@ class APIHandler(BaseHTTPRequestHandler):
         url = f"https://api-data.line.me/v2/bot/message/{urllib.parse.quote(message_id)}/content"
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(req, timeout=60, context=_https_ssl_context()) as resp:
                 content = resp.read()
                 content_type = resp.headers.get("Content-Type", "").lower()
         except Exception as e:
@@ -765,7 +785,7 @@ class APIHandler(BaseHTTPRequestHandler):
         m.set_content(message)
 
         try:
-            ctx = ssl.create_default_context()
+            ctx = _https_ssl_context()
             with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                 server.ehlo()
                 server.starttls(context=ctx)
@@ -908,7 +928,7 @@ class APIHandler(BaseHTTPRequestHandler):
         sent_subjects = []
         failed_batches = []
         try:
-            ctx = ssl.create_default_context()
+            ctx = _https_ssl_context()
             with smtplib.SMTP(smtp_host, smtp_port, timeout=smtp_timeout) as server:
                 server.ehlo()
                 server.starttls(context=ctx)
