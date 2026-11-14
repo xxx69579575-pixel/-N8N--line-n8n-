@@ -1,3 +1,5 @@
 @echo off
-cd /d "D:\n8n\CLAUDE 實做\本地AI企業問答助理"
-python scripts\api_server.py
+setlocal
+cd /d "%~dp0" || exit /b 1
+python "scripts\api_server.py"
+exit /b %errorlevel%

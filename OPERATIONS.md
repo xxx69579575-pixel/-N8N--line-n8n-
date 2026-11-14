@@ -2,7 +2,7 @@
 
 本專案的「運行手冊 + 變更紀錄」。每次系統有功能新增、bug 修正、或架構調整，**追加**到「變更紀錄」最上方並更新「系統架構」相關章節。
 
-最後更新：2026-06-30
+最後更新：2026-11-14
 
 ---
 
@@ -20,6 +20,8 @@
 | ngrok（**穩定**子網域） | `quadruplication-satisfyingly-corrina.ngrok-free.dev` → n8n:5681 | `start_all.bat` |
 | cloudflared（**動態** URL） | 隨機 `*.trycloudflare.com` → api_server:8765；URL 由腳本自動寫進 `.env` | `start_all.bat` |
 | Task Scheduler `AI-QA-Assistant-Startup` | 登入時觸發 `start_all.bat` | 已註冊（一次性） |
+
+開機啟動僅使用 `AI-QA-Assistant-Startup`，另保留 API / n8n watchdog。`setup_tasks.ps1` 會保留現有正式排程；首次安裝時透過 `scripts/start_all_launch.vbs` 隱藏執行 `scripts/start_all.ps1`。舊的 `AI_ApiServer`、`AI_Ngrok` 必須維持停用，Windows「啟動」資料夾也不可留有 `N8N_API_Server.lnk`、`N8N_Ngrok.lnk`，否則會重複啟動或呼叫已刪除腳本。
 
 ### 對外 URL
 
@@ -69,6 +71,14 @@ D:\智能助理資料庫自動備份\
 ---
 
 ## 變更紀錄
+
+### 2026-11-14 — 移除遺漏的開機捷徑，修復找不到 start_ngrok.bat 與 API 命令視窗錯誤
+- **根本原因**：6/30 停用舊排程、刪除舊腳本後，使用者的 Windows「啟動」資料夾仍保留 `N8N_Ngrok.lnk` 與 `N8N_API_Server.lnk`。前者呼叫已刪除的 `start_ngrok.bat`，後者透過 `cmd /c start /min` 再啟動一份 API。`start_api_server.bat` 的 UTF-8 中文固定路徑也會被 CMD 的系統字碼頁錯誤解析。
+- **本機修復**：兩個捷徑已備份、校驗後移出啟動資料夾；舊排程 `AI_ApiServer`、`AI_Ngrok` 確認維持 Disabled，正式啟動排程與兩個 watchdog 保留原設定。關閉舊 ngrok 啟動程序、API 命令視窗及其重複 Python 程序，保留正式背景 API、ngrok 與 cloudflared。
+- **備份**：`C:\Users\xx\AppData\Local\ai-qa-startup\backups\20261114-085905`，包含原捷徑、五個排程 XML、原啟動及安裝腳本。
+- **腳本修正**：`start_api_server.bat` 改用 `%~dp0` 定位專案、ASCII / CRLF 編碼及明確失敗退出；`setup_tasks.ps1` 改為整合式啟動安裝及舊啟動項清理，不再重建指向已刪除檔案的兩個舊排程。新安裝使用 `start_all_launch.vbs` 隱藏啟動並向排程器傳回結束碼。
+- **驗證**：API `127.0.0.1:8765/health`、n8n `127.0.0.1:5681/healthz` 均回 `status: ok`；API 僅保留正式背景程序 PID 30488。重跑安裝腳本成功，正式排程 XML 前後完全一致，兩個舊捷徑不存在。隔離測試確認批次檔與 VBS 在含中文及空白的路徑、不同工作目錄下可正確啟動並傳回子程序結束碼。
+- **驗證範圍**：未重新開機，未重跑會更新公開 tunnel URL 的完整 `start_all.ps1`；下次登入使用保留的正式排程，舊捷徑已不會觸發。
 
 ### 2026-09-05 — LINE 檔案上傳全數失敗：Python 不信任 LINE 新憑證鏈（`CERTIFICATE_VERIFY_FAILED`）
 - **觸發**：n8n 執行 **#4373**（`.docx`）與 **#4375**（`.pdf`）於 `11:11` 同時失敗，`Execute: line_download_content` 回 502：
